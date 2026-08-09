@@ -49,4 +49,20 @@
                    [{:mir/op :mir/return :mir/value :x86-64/rax}]}))))
   (testing "unsupported target"
     (is (thrown? clojure.lang.ExceptionInfo
-                 (mir/select-target :riscv64 program)))))
+                 (mir/select-target :riscv64 program))))
+  (testing "MIR control flow is closed even when it did not come from GMIR"
+    (let [base {:mir/version 1
+                :mir/target :x86-64
+                :mir/registers :physical
+                :mir/instructions
+                [{:mir/op :mir/label :mir/id :test.label/entry}
+                 {:mir/op :mir/jump :mir/target :test.label/missing}]}]
+      (is (thrown? clojure.lang.ExceptionInfo (mir/validate! base)))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (mir/validate!
+                    (update base :mir/instructions
+                            (fn [instructions]
+                              (-> instructions
+                                  (assoc-in [1 :mir/target] :test.label/entry)
+                                  (conj {:mir/op :mir/label
+                                         :mir/id :test.label/entry}))))))))))

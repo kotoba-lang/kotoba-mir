@@ -58,7 +58,15 @@
         (when (contains? #{:mir/label :mir/branch-zero :mir/jump} op)
           (let [id (if (= op :mir/label) (:mir/id instruction) (:mir/target instruction))]
             (when-not (gmir/label? id)
-              (reject! :invalid-label instruction)))))))
+              (reject! :invalid-label instruction))))))
+    (let [labels (map :mir/id (filter #(= :mir/label (:mir/op %)) instructions))
+          label-set (set labels)
+          targets (keep :mir/target instructions)]
+      (when-not (= (count labels) (count label-set))
+        (reject! :duplicate-label {:labels labels}))
+      (doseq [branch-target targets]
+        (when-not (contains? label-set branch-target)
+          (reject! :unresolved-target {:target branch-target})))))
   program)
 
 (defn select-target
