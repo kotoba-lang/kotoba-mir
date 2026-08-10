@@ -6,6 +6,7 @@
 (def v0 (gmir/vreg 0))
 (def v1 (gmir/vreg 1))
 (def v2 (gmir/vreg 2))
+(def v3 (gmir/vreg 3))
 
 (def program
   {:gmir/version 1
@@ -116,3 +117,78 @@
                                   (assoc-in [1 :mir/target] :test.label/entry)
                                   (conj {:mir/op :mir/label
                                          :mir/id :test.label/entry}))))))))))
+
+(def phi-program
+  {:gmir/version 2
+   :gmir/instructions
+   [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+    {:gmir/op :gmir/branch-zero :gmir/test v0 :gmir/target :test.label/else}
+    {:gmir/op :gmir/label :gmir/id :test.label/then}
+    {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 11}
+    {:gmir/op :gmir/label :gmir/id :test.label/then-exit}
+    {:gmir/op :gmir/jump :gmir/target :test.label/join}
+    {:gmir/op :gmir/label :gmir/id :test.label/else}
+    {:gmir/op :gmir/constant :gmir/dst v2 :gmir/value 22}
+    {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
+    {:gmir/op :gmir/jump :gmir/target :test.label/join}
+    {:gmir/op :gmir/label :gmir/id :test.label/join}
+    {:gmir/op :gmir/phi :gmir/dst v3
+     :gmir/incomings [{:gmir/predecessor :test.label/then-exit :gmir/value v1}
+                      {:gmir/predecessor :test.label/else-exit :gmir/value v2}]}
+    {:gmir/op :gmir/return :gmir/value v3}]})
+
+(deftest v2-phi-lowers-to-one-dedicated-frame-slot
+  (doseq [target mir/targets]
+    (let [selected (mir/select-target target phi-program)
+          allocated (mir/allocate-registers selected)
+          instructions (:mir/instructions allocated)
+          slot-zero-stores (filter #(and (= :mir/spill-store (:mir/op %))
+                                         (zero? (:mir/slot %)))
+                                   instructions)
+          slot-zero-loads (filter #(and (= :mir/spill-load (:mir/op %))
+                                        (zero? (:mir/slot %)))
+                                  instructions)]
+      (is (= 2 (:mir/version selected)))
+      (is (= 1 (:mir/frame-slots allocated)))
+      (is (= 2 (count slot-zero-stores)))
+      (is (= 1 (count slot-zero-loads)))
+      (is (not-any? #(= :mir/phi (:mir/op %)) instructions))
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))
+      (is (= allocated (mir/allocate-registers selected))))))
+
+(deftest phi-merge-slots-remain-disjoint-from-general-spills
+  (let [registers (mapv gmir/vreg (range 8))
+        [test a b c d e then-value else-value] registers
+        join-value (gmir/vreg 8)
+        result (gmir/vreg 9)
+        input {:gmir/version 2
+               :gmir/instructions
+               [{:gmir/op :gmir/constant :gmir/dst test :gmir/value 1}
+                {:gmir/op :gmir/constant :gmir/dst a :gmir/value 1}
+                {:gmir/op :gmir/constant :gmir/dst b :gmir/value 2}
+                {:gmir/op :gmir/constant :gmir/dst c :gmir/value 3}
+                {:gmir/op :gmir/constant :gmir/dst d :gmir/value 4}
+                {:gmir/op :gmir/constant :gmir/dst e :gmir/value 5}
+                {:gmir/op :gmir/branch-zero :gmir/test test :gmir/target :test.label/else}
+                {:gmir/op :gmir/label :gmir/id :test.label/then}
+                {:gmir/op :gmir/add :gmir/dst then-value :gmir/left a :gmir/right b}
+                {:gmir/op :gmir/label :gmir/id :test.label/then-exit}
+                {:gmir/op :gmir/jump :gmir/target :test.label/join}
+                {:gmir/op :gmir/label :gmir/id :test.label/else}
+                {:gmir/op :gmir/add :gmir/dst else-value :gmir/left c :gmir/right d}
+                {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
+                {:gmir/op :gmir/jump :gmir/target :test.label/join}
+                {:gmir/op :gmir/label :gmir/id :test.label/join}
+                {:gmir/op :gmir/phi :gmir/dst join-value
+                 :gmir/incomings
+                 [{:gmir/predecessor :test.label/then-exit :gmir/value then-value}
+                  {:gmir/predecessor :test.label/else-exit :gmir/value else-value}]}
+                {:gmir/op :gmir/add :gmir/dst result :gmir/left join-value :gmir/right e}
+                {:gmir/op :gmir/return :gmir/value result}]}
+        allocated (->> input (mir/select-target :x86-64) mir/allocate-registers)
+        slot-zero (filter #(and (contains? % :mir/slot) (zero? (:mir/slot %)))
+                          (:mir/instructions allocated))]
+    (is (> (:mir/frame-slots allocated) 1))
+    (is (= 3 (count slot-zero))
+        "two edge stores and one join load own slot zero; spills start at one")
+    (is (not-any? #(= :mir/phi (:mir/op %)) (:mir/instructions allocated)))))

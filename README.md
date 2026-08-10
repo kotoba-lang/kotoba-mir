@@ -7,10 +7,13 @@ physical register state.
 
 ## Owns
 
-- MIR v1 target and instruction contracts;
-- GMIR-to-MIR target selection for the closed v1 operation set;
+- MIR v1 target and instruction contracts plus the versioned MIR v2 phi
+  extension;
+- GMIR-to-MIR target selection for the matching closed operation set;
 - deterministic allocation onto the v1 scratch-register profiles, with bounded
   stack-slot spills when live values exceed the physical profile;
+- deterministic v2 phi lowering to dedicated frame slots, disjoint from
+  general spill slots;
 - fail-closed validation of virtual and physical MIR.
 
 ## Does not own
