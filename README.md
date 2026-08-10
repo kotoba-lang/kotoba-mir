@@ -16,8 +16,10 @@ physical register state.
   joins, one reusable temporary frame slot for cyclic parallel copies, and
   destination-slot coalescing in the general spill path;
 - fail-closed validation of virtual and physical MIR.
-- independent per-function frames and deterministic all-vreg preservation for
-  scalar direct calls, including parallel assignment into five ABI registers;
+- independent per-function frames and liveness-minimal preservation for
+  straight-line scalar direct calls, including parallel assignment into five
+  ABI registers; CFG/phi and excess-pressure cases retain deterministic
+  all-vreg preservation;
 
 ## Does not own
 
