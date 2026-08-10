@@ -7,6 +7,7 @@
 (def v1 (gmir/vreg 1))
 (def v2 (gmir/vreg 2))
 (def v3 (gmir/vreg 3))
+(def v4 (gmir/vreg 4))
 
 (def program
   {:gmir/version 1
@@ -320,8 +321,12 @@
       (is (= :physical (:mir/registers allocated)) target)
       (is (= :allocator (:mir/frame-policy callee)) target)
       (is (zero? (:mir/frame-slots callee)) target)
-      (is (= :all-vregs (:mir/frame-policy caller)) target)
-      (is (= 4 (:mir/frame-slots caller)) target)
+      (is (= :call-live (:mir/frame-policy caller)) target)
+      (is (= 1 (:mir/frame-slots caller)) target)
+      (is (= 1 (count (filter #(= :mir/spill-store (:mir/op %))
+                              (:mir/instructions caller)))) target)
+      (is (= 1 (count (filter #(= :mir/spill-load (:mir/op %))
+                              (:mir/instructions caller)))) target)
       (is (= (get mir/return-registers target) (:mir/dst call)) target)
       (is (= [(first (get mir/call-argument-registers target))]
              (:mir/arguments call)) target)
@@ -360,16 +365,76 @@
                                  (when (= :mir/call (:mir/op instruction)) index))
                                instructions))
             loads (subvec instructions (- call-index 5) call-index)]
+        (is (= :all-vregs (:mir/frame-policy caller)) target)
         (is (= (get mir/call-argument-registers target)
                (mapv :mir/dst loads)) target)
         (is (= (vec (range 5)) (mapv :mir/slot loads)) target)
         (is (every? #(= :mir/spill-load (:mir/op %)) loads) target)))))
 
+(deftest v3-call-liveness-does-not-materialize-dead-values
+  (let [module {:gmir/version 3
+                :gmir/entry 'main
+                :gmir/functions
+                [{:gmir/name 'identity :gmir/arity 1
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                   {:gmir/op :gmir/return :gmir/value v0}]}
+                 {:gmir/name 'main :gmir/arity 1
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                   {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 99}
+                   {:gmir/op :gmir/call :gmir/dst v2
+                    :gmir/callee 'identity :gmir/arguments [v0]}
+                   {:gmir/op :gmir/return :gmir/value v2}]}]}]
+    (doseq [target mir/targets]
+      (let [caller (second (:mir/functions
+                            (->> module (mir/select-target target)
+                                 mir/allocate-registers)))]
+        (is (= :call-live (:mir/frame-policy caller)) target)
+        (is (zero? (:mir/frame-slots caller)) target)
+        (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
+                                  (:mir/op %))
+                      (:mir/instructions caller)) target)))))
+
+(deftest v3-call-liveness-preserves-one-value-across-two-calls
+  (let [module {:gmir/version 3
+                :gmir/entry 'main
+                :gmir/functions
+                [{:gmir/name 'inc-one :gmir/arity 1
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                   {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 1}
+                   {:gmir/op :gmir/add :gmir/dst v2 :gmir/left v0 :gmir/right v1}
+                   {:gmir/op :gmir/return :gmir/value v2}]}
+                 {:gmir/name 'main :gmir/arity 0
+                  :gmir/instructions
+                  [{:gmir/op :gmir/constant :gmir/dst v0 :gmir/value 40}
+                   {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 1}
+                   {:gmir/op :gmir/call :gmir/dst v2
+                    :gmir/callee 'inc-one :gmir/arguments [v1]}
+                   {:gmir/op :gmir/call :gmir/dst v3
+                    :gmir/callee 'inc-one :gmir/arguments [v2]}
+                   {:gmir/op :gmir/add :gmir/dst v4 :gmir/left v0 :gmir/right v3}
+                   {:gmir/op :gmir/return :gmir/value v4}]}]}]
+    (doseq [target mir/targets]
+      (let [caller (second (:mir/functions
+                            (->> module (mir/select-target target)
+                                 mir/allocate-registers)))
+            instructions (:mir/instructions caller)]
+        (is (= :call-live (:mir/frame-policy caller)) target)
+        (is (= 1 (:mir/frame-slots caller)) target)
+        (is (= 1 (count (filter #(= :mir/spill-store (:mir/op %)) instructions)))
+            target)
+        (is (= 1 (count (filter #(= :mir/spill-load (:mir/op %)) instructions)))
+            target)
+        (is (= 2 (count (filter #(= :mir/call (:mir/op %)) instructions)))
+            target)))))
+
 (deftest v3-physical-call-contract-fails-closed
   (let [allocated (->> scalar-call-module
                        (mir/select-target :x86-64)
                        mir/allocate-registers)]
-    (testing "call functions must declare all-vreg frame ownership"
+    (testing "call functions must declare a closed call frame policy"
       (is (thrown? clojure.lang.ExceptionInfo
                    (mir/validate!
                     (assoc-in allocated [:mir/functions 1 :mir/frame-policy]
