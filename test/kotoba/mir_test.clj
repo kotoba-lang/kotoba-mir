@@ -33,6 +33,15 @@
       (is (zero? (:mir/frame-slots first-result)))
       (is (not-any? gmir/vreg? (tree-seq coll? seq first-result))))))
 
+(deftest selection-and-allocation-cover-the-i64-arithmetic-family
+  (doseq [op [:gmir/add :gmir/subtract :gmir/multiply :gmir/quotient
+              :gmir/bit-and :gmir/bit-or :gmir/bit-xor]]
+    (let [input (assoc-in program [:gmir/instructions 2 :gmir/op] op)
+          allocated (->> input (mir/select-target :aarch64)
+                         mir/allocate-registers)]
+      (is (= (keyword "mir" (name op))
+             (get-in allocated [:mir/instructions 2 :mir/op]))))))
+
 (deftest allocation-spills-deterministically-when-the-scratch-profile-is-exhausted
   (let [registers (mapv gmir/vreg (range 6))
         program {:gmir/version 1

@@ -17,6 +17,12 @@
   {:mir/argument #{:mir/op :mir/dst :mir/index}
    :mir/constant #{:mir/op :mir/dst :mir/value}
    :mir/add #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/subtract #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/multiply #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/quotient #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/bit-and #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/bit-or #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/bit-xor #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/spill-load #{:mir/op :mir/dst :mir/slot}
    :mir/spill-store #{:mir/op :mir/src :mir/slot}
    :mir/label #{:mir/op :mir/id}
@@ -217,10 +223,11 @@
               [(assoc instruction :mir/dst r0)
                (store-value instruction dst r0)]
 
-              :mir/add
+              (:mir/add :mir/subtract :mir/multiply :mir/quotient
+               :mir/bit-and :mir/bit-or :mir/bit-xor)
               [(load-value instruction left r0)
                (load-value instruction right r1)
-               {:mir/op :mir/add :mir/dst r0 :mir/left r0 :mir/right r1}
+               {:mir/op op :mir/dst r0 :mir/left r0 :mir/right r1}
                (store-value instruction dst r0)]
 
               :mir/branch-zero
