@@ -286,3 +286,103 @@
     (is (not-any? #(= :mir/move (:mir/op %)) instructions)
         "the general spill path coalesces slots instead of introducing moves")
     (is (not-any? #(= :mir/phi (:mir/op %)) (:mir/instructions allocated)))))
+
+(def scalar-call-module
+  {:gmir/version 3
+   :gmir/entry 'main
+   :gmir/functions
+   [{:gmir/name 'add-one
+     :gmir/arity 1
+     :gmir/instructions
+     [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+      {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 1}
+      {:gmir/op :gmir/add :gmir/dst v2 :gmir/left v0 :gmir/right v1}
+      {:gmir/op :gmir/return :gmir/value v2}]}
+    {:gmir/name 'main
+     :gmir/arity 1
+     :gmir/instructions
+     [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+      {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 10}
+      {:gmir/op :gmir/call :gmir/dst v2 :gmir/callee 'add-one
+       :gmir/arguments [v0]}
+      {:gmir/op :gmir/add :gmir/dst v3 :gmir/left v1 :gmir/right v2}
+      {:gmir/op :gmir/return :gmir/value v3}]}]})
+
+(deftest v3-selects-and-allocates-independent-call-safe-function-frames
+  (doseq [target mir/targets]
+    (let [selected (mir/select-target target scalar-call-module)
+          allocated (mir/allocate-registers selected)
+          [callee caller] (:mir/functions allocated)
+          call (first (filter #(= :mir/call (:mir/op %))
+                              (:mir/instructions caller)))]
+      (is (= 3 (:mir/version selected)) target)
+      (is (= :virtual (:mir/registers selected)) target)
+      (is (= :physical (:mir/registers allocated)) target)
+      (is (= :allocator (:mir/frame-policy callee)) target)
+      (is (zero? (:mir/frame-slots callee)) target)
+      (is (= :all-vregs (:mir/frame-policy caller)) target)
+      (is (= 4 (:mir/frame-slots caller)) target)
+      (is (= (get mir/return-registers target) (:mir/dst call)) target)
+      (is (= [(first (get mir/call-argument-registers target))]
+             (:mir/arguments call)) target)
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target)
+      (is (= allocated (->> scalar-call-module
+                            (mir/select-target target)
+                            mir/allocate-registers)) target))))
+
+(deftest v3-call-arguments-are-loaded-in-parallel-from-stable-frame-slots
+  (let [args (mapv gmir/vreg (range 5))
+        result (gmir/vreg 5)
+        module {:gmir/version 3
+                :gmir/entry 'main
+                :gmir/functions
+                [{:gmir/name 'callee :gmir/arity 5
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                   {:gmir/op :gmir/return :gmir/value v0}]}
+                 {:gmir/name 'main :gmir/arity 5
+                  :gmir/instructions
+                  (vec (concat
+                        (map-indexed
+                         (fn [index register]
+                           {:gmir/op :gmir/argument :gmir/dst register
+                            :gmir/index index}) args)
+                        [{:gmir/op :gmir/call :gmir/dst result
+                          :gmir/callee 'callee :gmir/arguments args}
+                         {:gmir/op :gmir/return :gmir/value result}]))}]}]
+    (doseq [target mir/targets]
+      (let [caller (second (:mir/functions
+                            (->> module (mir/select-target target)
+                                 mir/allocate-registers)))
+            instructions (:mir/instructions caller)
+            call-index (first (keep-indexed
+                               (fn [index instruction]
+                                 (when (= :mir/call (:mir/op instruction)) index))
+                               instructions))
+            loads (subvec instructions (- call-index 5) call-index)]
+        (is (= (get mir/call-argument-registers target)
+               (mapv :mir/dst loads)) target)
+        (is (= (vec (range 5)) (mapv :mir/slot loads)) target)
+        (is (every? #(= :mir/spill-load (:mir/op %)) loads) target)))))
+
+(deftest v3-physical-call-contract-fails-closed
+  (let [allocated (->> scalar-call-module
+                       (mir/select-target :x86-64)
+                       mir/allocate-registers)]
+    (testing "call functions must declare all-vreg frame ownership"
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (mir/validate!
+                    (assoc-in allocated [:mir/functions 1 :mir/frame-policy]
+                              :allocator)))))
+    (testing "physical calls use the exact ABI argument and return registers"
+      (let [call-index (first
+                        (keep-indexed
+                         (fn [index instruction]
+                           (when (= :mir/call (:mir/op instruction)) index))
+                         (get-in allocated [:mir/functions 1 :mir/instructions])))]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (mir/validate!
+                      (assoc-in allocated
+                                [:mir/functions 1 :mir/instructions call-index
+                                 :mir/arguments]
+                                [:x86-64/rax]))))))))
