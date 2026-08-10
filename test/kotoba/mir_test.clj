@@ -33,9 +33,11 @@
       (is (zero? (:mir/frame-slots first-result)))
       (is (not-any? gmir/vreg? (tree-seq coll? seq first-result))))))
 
-(deftest selection-and-allocation-cover-the-i64-arithmetic-family
+(deftest selection-and-allocation-cover-the-i64-scalar-family
   (doseq [op [:gmir/add :gmir/subtract :gmir/multiply :gmir/quotient
-              :gmir/bit-and :gmir/bit-or :gmir/bit-xor]]
+              :gmir/bit-and :gmir/bit-or :gmir/bit-xor
+              :gmir/equal :gmir/less-than :gmir/greater-than
+              :gmir/less-or-equal :gmir/greater-or-equal]]
     (let [input (assoc-in program [:gmir/instructions 2 :gmir/op] op)
           allocated (->> input (mir/select-target :aarch64)
                          mir/allocate-registers)]
