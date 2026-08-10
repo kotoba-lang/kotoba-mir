@@ -23,6 +23,11 @@
    :mir/bit-and #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/bit-or #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/bit-xor #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/less-than #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/greater-than #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/less-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/spill-load #{:mir/op :mir/dst :mir/slot}
    :mir/spill-store #{:mir/op :mir/src :mir/slot}
    :mir/label #{:mir/op :mir/id}
@@ -224,7 +229,9 @@
                (store-value instruction dst r0)]
 
               (:mir/add :mir/subtract :mir/multiply :mir/quotient
-               :mir/bit-and :mir/bit-or :mir/bit-xor)
+               :mir/bit-and :mir/bit-or :mir/bit-xor
+               :mir/equal :mir/less-than :mir/greater-than
+               :mir/less-or-equal :mir/greater-or-equal)
               [(load-value instruction left r0)
                (load-value instruction right r1)
                {:mir/op op :mir/dst r0 :mir/left r0 :mir/right r1}
