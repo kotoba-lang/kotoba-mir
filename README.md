@@ -7,8 +7,8 @@ physical register state.
 
 ## Owns
 
-- MIR v1 target and instruction contracts plus the versioned MIR v2 phi
-  extension;
+- MIR v1 target and instruction contracts plus the versioned MIR v2 phi and
+  MIR v3 function/call extensions;
 - GMIR-to-MIR target selection for the matching closed operation set;
 - deterministic allocation onto the v1 scratch-register profiles, with bounded
   stack-slot spills when live values exceed the physical profile;
@@ -16,6 +16,8 @@ physical register state.
   joins, one reusable temporary frame slot for cyclic parallel copies, and
   destination-slot coalescing in the general spill path;
 - fail-closed validation of virtual and physical MIR.
+- independent per-function frames and deterministic all-vreg preservation for
+  scalar direct calls, including parallel assignment into five ABI registers;
 
 ## Does not own
 

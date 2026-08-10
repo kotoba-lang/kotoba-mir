@@ -1,14 +1,22 @@
 (ns kotoba.mir
-  "Closed target-selected Machine IR v1/v2 and deterministic allocation."
+  "Closed target-selected Machine IR and deterministic allocation."
   (:require [kotoba.gmir :as gmir]))
 
-(def version 2)
-(def supported-versions #{1 2})
+(def version 3)
+(def supported-versions #{1 2 3})
 (def targets #{:x86-64 :aarch64})
 
 (def physical-registers
   {:x86-64 [:x86-64/rax :x86-64/rcx :x86-64/rdx :x86-64/r8]
    :aarch64 [:aarch64/x0 :aarch64/x1 :aarch64/x2 :aarch64/x3]})
+
+(def call-argument-registers
+  {:x86-64 [:x86-64/rdi :x86-64/rsi :x86-64/rdx :x86-64/rcx :x86-64/r8]
+   :aarch64 [:aarch64/x0 :aarch64/x1 :aarch64/x2 :aarch64/x3 :aarch64/x4]})
+
+(def return-registers
+  {:x86-64 :x86-64/rax
+   :aarch64 :aarch64/x0})
 
 (defn- reject! [problem instruction]
   (throw (ex-info (str "MIR rejected: " (name problem))
@@ -36,25 +44,31 @@
    :mir/branch-zero #{:mir/op :mir/test :mir/target}
    :mir/jump #{:mir/op :mir/target}
    :mir/phi #{:mir/op :mir/dst :mir/incomings}
+   :mir/call #{:mir/op :mir/dst :mir/callee :mir/arguments}
    :mir/return #{:mir/op :mir/value}})
 
 (def ^:private v1-operations
-  (disj (set (keys instruction-keysets)) :mir/phi))
+  (disj (set (keys instruction-keysets)) :mir/phi :mir/call))
 
 (def ^:private v2-operations
+  (disj (set (keys instruction-keysets)) :mir/call))
+
+(def ^:private v3-operations
   (set (keys instruction-keysets)))
 
 (defn- operations-for [program-version]
   (case program-version
     1 v1-operations
     2 v2-operations
+    3 v3-operations
     #{}))
 
 (defn- physical-register? [target value]
-  (contains? (set (get physical-registers target)) value))
+  (contains? (set (concat (get physical-registers target)
+                          (get call-argument-registers target)))
+             value))
 
-(defn validate!
-  "Validate virtual or physical MIR and return it unchanged."
+(defn- validate-flat!
   [{:mir/keys [version target registers instructions frame-slots] :as program}]
   (when-not (and (map? program)
                  (contains? #{#{:mir/version :mir/target :mir/registers :mir/instructions}
@@ -82,7 +96,11 @@
         (when (and (= :virtual registers)
                    (contains? #{:mir/spill-load :mir/spill-store :mir/move} op))
           (reject! :physical-operation-in-virtual-program instruction))
-        (doseq [register (keep instruction [:mir/dst :mir/src :mir/left :mir/right :mir/test])]
+        (doseq [register (concat
+                          (keep instruction [:mir/dst :mir/src :mir/left
+                                             :mir/right :mir/test])
+                          (when (vector? (:mir/arguments instruction))
+                            (:mir/arguments instruction)))]
           (when-not (register? register)
             (reject! :register-profile-violation instruction)))
         (when (and (= op :mir/return) (not (register? (:mir/value instruction))))
@@ -99,6 +117,19 @@
                                         (register? (:mir/value incoming))))
                                  (:mir/incomings instruction)))
             (reject! :invalid-phi-incomings instruction)))
+        (when (= op :mir/call)
+          (when-not (and (= 3 version)
+                         (gmir/function-id? (:mir/callee instruction))
+                         (vector? (:mir/arguments instruction))
+                         (<= (count (:mir/arguments instruction)) 5))
+            (reject! :invalid-call instruction))
+          (when (= :physical registers)
+            (when-not (and (= (:mir/dst instruction)
+                              (get return-registers target))
+                           (= (:mir/arguments instruction)
+                              (subvec (get call-argument-registers target)
+                                      0 (count (:mir/arguments instruction)))))
+              (reject! :physical-call-profile-violation instruction))))
         (when (and (= op :mir/constant)
                    (not (gmir/i64-value? (:mir/value instruction))))
           (reject! :constant-not-i64 instruction))
@@ -155,6 +186,111 @@
                 instructions)}))))
   program)
 
+(defn- validate-v3-module!
+  [{:mir/keys [target registers entry functions] :as module}]
+  (when-not (and (= #{:mir/version :mir/target :mir/registers
+                      :mir/entry :mir/functions}
+                    (set (keys module)))
+                 (contains? targets target)
+                 (contains? #{:virtual :physical} registers)
+                 (gmir/function-id? entry)
+                 (vector? functions)
+                 (seq functions))
+    (reject! :non-canonical-module module))
+  (let [names (mapv :mir/name functions)
+        signatures (into {} (map (juxt :mir/name :mir/arity) functions))]
+    (when-not (and (every? gmir/function-id? names)
+                   (= (count names) (count (distinct names)))
+                   (contains? signatures entry))
+      (reject! :invalid-module-functions {:entry entry :names names}))
+    (doseq [{:mir/keys [name arity frame-slots frame-policy instructions]
+             :as function} functions]
+      (let [expected-keys (if (= :virtual registers)
+                            #{:mir/name :mir/arity :mir/instructions}
+                            #{:mir/name :mir/arity :mir/frame-slots
+                              :mir/frame-policy :mir/instructions})
+            calls (filter #(= :mir/call (:mir/op %)) instructions)]
+        (when-not (and (= expected-keys (set (keys function)))
+                       (gmir/function-id? name)
+                       (integer? arity) (<= 0 arity 5)
+                       (or (= :virtual registers)
+                           (contains? #{:allocator :all-vregs} frame-policy)))
+          (reject! :non-canonical-function function))
+        (validate-flat!
+         (cond-> {:mir/version 3 :mir/target target :mir/registers registers
+                  :mir/instructions instructions}
+           (= :physical registers) (assoc :mir/frame-slots frame-slots)))
+        (when (and (= :physical registers)
+                   (not= frame-policy (if (seq calls) :all-vregs :allocator)))
+          (reject! :call-frame-policy-violation function))
+        (when (and (= :physical registers) (= :all-vregs frame-policy))
+          (let [value-ops #{:mir/argument :mir/constant :mir/add :mir/subtract
+                            :mir/multiply :mir/quotient :mir/bit-and :mir/bit-or
+                            :mir/bit-xor :mir/equal :mir/less-than
+                            :mir/greater-than :mir/less-or-equal
+                            :mir/greater-or-equal :mir/call}]
+            (doseq [[index instruction] (map-indexed vector instructions)
+                    :when (contains? value-ops (:mir/op instruction))]
+              (let [store (get instructions (inc index))]
+                (when-not (and (= :mir/spill-store (:mir/op store))
+                               (= (:mir/dst instruction) (:mir/src store)))
+                  (reject! :unbacked-call-frame-value
+                           {:function name :instruction instruction}))))
+            (doseq [[index {:mir/keys [arguments] :as call}]
+                    (map-indexed vector instructions)
+                    :when (= :mir/call (:mir/op call))]
+              (let [loads (when (>= index (count arguments))
+                            (subvec instructions (- index (count arguments)) index))]
+                (when-not (and (some? loads)
+                               (= (count loads) (count arguments))
+                               (every? #(= :mir/spill-load (:mir/op %)) loads)
+                               (= arguments (mapv :mir/dst loads)))
+                  (reject! :non-parallel-call-arguments
+                           {:function name :call call}))))))
+        (doseq [{:mir/keys [callee arguments] :as call} calls]
+          (let [callee-arity (get signatures callee ::missing)]
+            (when (= ::missing callee-arity)
+              (reject! :unresolved-callee call))
+            (when-not (= callee-arity (count arguments))
+              (reject! :call-arity-mismatch
+                       {:function name :call call :expected callee-arity})))))))
+  module)
+
+(defn validate!
+  "Validate virtual or physical MIR and return it unchanged. v3 modules own
+  independent function frames and a closed scalar direct-call graph."
+  [{:mir/keys [version] :as program}]
+  (if (= 3 version)
+    (validate-v3-module! program)
+    (validate-flat! program)))
+
+(defn- select-instruction [instruction]
+  (reduce-kv
+   (fn [out key value]
+     (assoc out
+            (case key
+              :gmir/op :mir/op
+              :gmir/dst :mir/dst
+              :gmir/index :mir/index
+              :gmir/value :mir/value
+              :gmir/left :mir/left
+              :gmir/right :mir/right
+              :gmir/id :mir/id
+              :gmir/test :mir/test
+              :gmir/target :mir/target
+              :gmir/incomings :mir/incomings
+              :gmir/callee :mir/callee
+              :gmir/arguments :mir/arguments)
+            (cond
+              (= key :gmir/op) (keyword "mir" (name value))
+              (= key :gmir/incomings)
+              (mapv (fn [incoming]
+                      {:mir/predecessor (:gmir/predecessor incoming)
+                       :mir/value (:gmir/value incoming)})
+                    value)
+              :else value)))
+   {} instruction))
+
 (defn select-target
   "Select the closed GMIR operation set into target MIR, preserving vregs."
   [target program]
@@ -162,38 +298,26 @@
     (reject! :unsupported-target {:target target}))
   (gmir/validate! program)
   (validate!
-   {:mir/version (:gmir/version program)
-    :mir/target target
-    :mir/registers :virtual
-    :mir/instructions
-    (mapv (fn [instruction]
-            (reduce-kv
-             (fn [out key value]
-               (assoc out
-                      (case key
-                        :gmir/op :mir/op
-                        :gmir/dst :mir/dst
-                        :gmir/index :mir/index
-                        :gmir/value :mir/value
-                        :gmir/left :mir/left
-                        :gmir/right :mir/right
-                        :gmir/id :mir/id
-                        :gmir/test :mir/test
-                        :gmir/target :mir/target
-                        :gmir/incomings :mir/incomings)
-                      (cond
-                        (= key :gmir/op) (keyword "mir" (name value))
-                        (= key :gmir/incomings)
-                        (mapv (fn [incoming]
-                                {:mir/predecessor (:gmir/predecessor incoming)
-                                 :mir/value (:gmir/value incoming)})
-                              value)
-                        :else value)))
-             {} instruction))
-          (:gmir/instructions program))}))
+   (if (= 3 (:gmir/version program))
+     {:mir/version 3
+      :mir/target target
+      :mir/registers :virtual
+      :mir/entry (:gmir/entry program)
+      :mir/functions
+      (mapv (fn [{:gmir/keys [name arity instructions]}]
+              {:mir/name name :mir/arity arity
+               :mir/instructions (mapv select-instruction instructions)})
+            (:gmir/functions program))}
+     {:mir/version (:gmir/version program)
+      :mir/target target
+      :mir/registers :virtual
+      :mir/instructions (mapv select-instruction
+                              (:gmir/instructions program))})))
 
 (defn- sources [instruction]
-  (keep instruction [:mir/src :mir/left :mir/right :mir/test :mir/value]))
+  (concat (keep instruction [:mir/src :mir/left :mir/right :mir/test :mir/value])
+          (when (vector? (:mir/arguments instruction))
+            (:mir/arguments instruction))))
 
 (defn- preceding-label [instructions index]
   (loop [cursor (dec index)]
@@ -349,10 +473,10 @@
                   {:out out :used-temp? used-temp? :valid? true}))]
           (if-not valid?
             program
-            (validate! (assoc program
-                              :mir/frame-slots (+ (- frame-slots (count candidates))
-                                                  (if used-temp? 1 0))
-                              :mir/instructions (vec out)))))))))
+            (validate-flat! (assoc program
+                                   :mir/frame-slots (+ (- frame-slots (count candidates))
+                                                       (if used-temp? 1 0))
+                                   :mir/instructions (vec out)))))))))
 
 (defn- last-uses [instructions]
   (reduce-kv
@@ -406,7 +530,7 @@
                 assigned (apply dissoc assigned expired)]
             (recur (inc index) (next remaining) assigned (vec free)
                    (conj out allocated))))
-        (validate!
+        (validate-flat!
          {:mir/version version
           :mir/target target
           :mir/registers :physical
@@ -434,7 +558,8 @@
   [{:mir/keys [version target instructions] :as program} merge-dst-by-slot]
   (let [slots (spill-slots instructions 0)
         slot-count (count slots)
-        [r0 r1] (get physical-registers target)]
+        [r0 r1] (get physical-registers target)
+        argument-registers (get call-argument-registers target)]
     (when (> slot-count 4095)
       (reject! :spill-frame-too-large {:frame-slots slot-count}))
     (letfn [(slot-of [instruction value]
@@ -446,7 +571,7 @@
             (store-value [instruction value register]
               {:mir/op :mir/spill-store :mir/src register
                :mir/slot (slot-of instruction value)})]
-      (validate!
+      (validate-flat!
         {:mir/version version
         :mir/target target
         :mir/registers :physical
@@ -454,7 +579,8 @@
         :mir/instructions
         (vec
          (mapcat
-          (fn [{:mir/keys [op dst left right test value] :as instruction}]
+          (fn [{:mir/keys [op dst left right test value callee arguments]
+                :as instruction}]
             (case op
               (:mir/argument :mir/constant)
               [(assoc instruction :mir/dst r0)
@@ -482,6 +608,18 @@
               [(load-value instruction test r0)
                (assoc instruction :mir/test r0)]
 
+              :mir/call
+              (let [call-registers (subvec argument-registers 0 (count arguments))]
+                (concat
+                 (mapv (fn [value register]
+                         (load-value instruction value register))
+                       arguments call-registers)
+                 [{:mir/op :mir/call
+                   :mir/dst (get return-registers target)
+                   :mir/callee callee
+                   :mir/arguments call-registers}
+                  (store-value instruction dst (get return-registers target))]))
+
               :mir/return
               [(load-value instruction value r0)
                (assoc instruction :mir/value r0)]
@@ -490,17 +628,50 @@
               (reject! :unsupported-spill-operation instruction)))
           instructions))}))))
 
-(defn allocate-registers
+(defn- allocate-flat
   "Allocate virtual MIR deterministically, inserting bounded stack-slot spills
   when the target scratch profile is exhausted."
   [program]
-  (validate! program)
+  (validate-flat! program)
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)]
-    (try
-      (coalesce-phi-transports
-       (allocate-without-spills program merge-slots)
-       merge-slots)
-      (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
-        (if (= :spill-required (:problem (ex-data error)))
-          (allocate-with-spills program merge-dst-by-slot)
-          (throw error))))))
+    (if (some #(= :mir/call (:mir/op %)) (:mir/instructions program))
+      (allocate-with-spills program merge-dst-by-slot)
+      (try
+        (coalesce-phi-transports
+         (allocate-without-spills program merge-slots)
+         merge-slots)
+        (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
+          (if (= :spill-required (:problem (ex-data error)))
+            (allocate-with-spills program merge-dst-by-slot)
+            (throw error)))))))
+
+(defn allocate-registers
+  "Allocate a legacy flat program or every function in a v3 module. A function
+  containing a call uses one deterministic slot per vreg, loads arguments from
+  those stable slots into ABI registers, and stores the return register before
+  any later use. This makes all allocator registers safely caller-clobbered."
+  [{:mir/keys [version target registers entry functions] :as program}]
+  (validate! program)
+  (if (= 3 version)
+    (do
+      (when-not (= :virtual registers)
+        (reject! :registers-not-virtual program))
+      (validate!
+       {:mir/version 3
+        :mir/target target
+        :mir/registers :physical
+        :mir/entry entry
+        :mir/functions
+        (mapv (fn [{:mir/keys [name arity instructions]}]
+                (let [calls? (some #(= :mir/call (:mir/op %)) instructions)
+                      allocated (allocate-flat
+                                 {:mir/version 3 :mir/target target
+                                  :mir/registers :virtual
+                                  :mir/instructions instructions})]
+                  {:mir/name name
+                   :mir/arity arity
+                   :mir/frame-slots (:mir/frame-slots allocated)
+                   :mir/frame-policy (if calls? :all-vregs :allocator)
+                   :mir/instructions (:mir/instructions allocated)}))
+              functions)}))
+    (allocate-flat program)))
