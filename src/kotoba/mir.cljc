@@ -31,6 +31,7 @@
    :mir/greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/spill-load #{:mir/op :mir/dst :mir/slot}
    :mir/spill-store #{:mir/op :mir/src :mir/slot}
+   :mir/move #{:mir/op :mir/dst :mir/src}
    :mir/label #{:mir/op :mir/id}
    :mir/branch-zero #{:mir/op :mir/test :mir/target}
    :mir/jump #{:mir/op :mir/target}
@@ -79,8 +80,8 @@
                        (= (get instruction-keysets op) (set (keys instruction))))
           (reject! :non-canonical-instruction instruction))
         (when (and (= :virtual registers)
-                   (contains? #{:mir/spill-load :mir/spill-store} op))
-          (reject! :spill-in-virtual-program instruction))
+                   (contains? #{:mir/spill-load :mir/spill-store :mir/move} op))
+          (reject! :physical-operation-in-virtual-program instruction))
         (doseq [register (keep instruction [:mir/dst :mir/src :mir/left :mir/right :mir/test])]
           (when-not (register? register)
             (reject! :register-profile-violation instruction)))
@@ -242,7 +243,80 @@
                  {:label nil :out []}
                  instructions))]
     {:program (assoc program :mir/instructions (vec lowered))
-     :merge-slots (count phis)}))
+     :merge-slots (count phis)
+     :merge-dst-by-slot (into {} (map-indexed (fn [slot [_ instruction]]
+                                                [slot (:mir/dst instruction)])
+                                              phis))}))
+
+(defn- singleton-edge-merge-slots
+  "Return merge slots whose every predecessor edge transports exactly one phi.
+  Multi-phi edges need a parallel-copy scheduler and deliberately stay on the
+  frame-backed path until that scheduler exists."
+  [instructions merge-slots]
+  (let [merge-store? #(and (= :mir/spill-store (:mir/op %))
+                           (< (:mir/slot %) merge-slots))]
+    (let [{:keys [seen unsafe]}
+          (reduce (fn [{:keys [run seen unsafe] :as state} instruction]
+               (cond
+                 (merge-store? instruction)
+                 (assoc state :run (conj run (:mir/slot instruction)))
+
+                 (= :mir/jump (:mir/op instruction))
+                 {:run []
+                  :seen (into seen run)
+                  :unsafe (if (<= 2 (count run)) (into unsafe run) unsafe)}
+
+                 :else
+                 (assoc state :run [])))
+                  {:run [] :seen #{} :unsafe #{}}
+                  instructions)]
+      (set (remove unsafe seen)))))
+
+(defn- coalesce-direct-phi-transports
+  "Replace safe single-phi edge stores and the corresponding join load with a
+  direct physical-register move. Remaining frame slots are compacted."
+  [{:mir/keys [instructions frame-slots] :as program} merge-slots]
+  (if (zero? merge-slots)
+    program
+    (let [loads-by-slot (group-by :mir/slot
+                                  (filter #(and (= :mir/spill-load (:mir/op %))
+                                                (< (:mir/slot %) merge-slots))
+                                          instructions))
+          stores-by-slot (group-by :mir/slot
+                                   (filter #(and (= :mir/spill-store (:mir/op %))
+                                                 (< (:mir/slot %) merge-slots))
+                                           instructions))
+          singleton-edge-slots (singleton-edge-merge-slots instructions merge-slots)
+          candidates (->> (range merge-slots)
+                          (filter #(and (contains? singleton-edge-slots %)
+                                        (= 1 (count (get loads-by-slot %)))
+                                        (<= 2 (count (get stores-by-slot %)))))
+                          set)
+          load-register (into {} (map (fn [slot]
+                                        [slot (:mir/dst (first (get loads-by-slot slot)))])
+                                      candidates))
+          compact-slot (fn [slot]
+                         (- slot (count (filter #(< % slot) candidates))))
+          rewritten
+          (mapcat (fn [{:mir/keys [op slot src dst] :as instruction}]
+                    (cond
+                      (and (= :mir/spill-store op) (contains? candidates slot))
+                      (let [target (get load-register slot)]
+                        (if (= target src)
+                          []
+                          [{:mir/op :mir/move :mir/dst target :mir/src src}]))
+
+                      (and (= :mir/spill-load op) (contains? candidates slot))
+                      []
+
+                      (contains? instruction :mir/slot)
+                      [(assoc instruction :mir/slot (compact-slot slot))]
+
+                      :else [instruction]))
+                  instructions)]
+      (validate! (assoc program
+                        :mir/frame-slots (- frame-slots (count candidates))
+                        :mir/instructions (vec rewritten))))))
 
 (defn- last-uses [instructions]
   (reduce-kv
@@ -321,9 +395,9 @@
            instructions)))
 
 (defn- allocate-with-spills
-  [{:mir/keys [version target instructions] :as program} merge-slots]
-  (let [slots (spill-slots instructions merge-slots)
-        slot-count (+ merge-slots (count slots))
+  [{:mir/keys [version target instructions] :as program} merge-dst-by-slot]
+  (let [slots (spill-slots instructions 0)
+        slot-count (count slots)
         [r0 r1] (get physical-registers target)]
     (when (> slot-count 4095)
       (reject! :spill-frame-too-large {:frame-slots slot-count}))
@@ -351,12 +425,13 @@
                (store-value instruction dst r0)]
 
               :mir/merge-store
-              [(load-value instruction (:mir/src instruction) r0)
-               {:mir/op :mir/spill-store :mir/src r0 :mir/slot (:mir/slot instruction)}]
+              (let [phi-dst (or (get merge-dst-by-slot (:mir/slot instruction))
+                                (reject! :unknown-merge-slot instruction))]
+                [(load-value instruction (:mir/src instruction) r0)
+                 (store-value instruction phi-dst r0)])
 
               :mir/merge-load
-              [{:mir/op :mir/spill-load :mir/dst r0 :mir/slot (:mir/slot instruction)}
-               (store-value instruction dst r0)]
+              []
 
               (:mir/add :mir/subtract :mir/multiply :mir/quotient
                :mir/bit-and :mir/bit-or :mir/bit-xor
@@ -384,10 +459,12 @@
   when the target scratch profile is exhausted."
   [program]
   (validate! program)
-  (let [{:keys [program merge-slots]} (lower-phis program)]
+  (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)]
     (try
-      (allocate-without-spills program merge-slots)
+      (coalesce-direct-phi-transports
+       (allocate-without-spills program merge-slots)
+       merge-slots)
       (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
         (if (= :spill-required (:problem (ex-data error)))
-          (allocate-with-spills program merge-slots)
+          (allocate-with-spills program merge-dst-by-slot)
           (throw error))))))

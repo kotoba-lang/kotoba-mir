@@ -12,8 +12,9 @@ physical register state.
 - GMIR-to-MIR target selection for the matching closed operation set;
 - deterministic allocation onto the v1 scratch-register profiles, with bounded
   stack-slot spills when live values exceed the physical profile;
-- deterministic v2 phi lowering to dedicated frame slots, disjoint from
-  general spill slots;
+- deterministic v2 phi lowering with direct edge moves for proven-safe
+  single-phi joins, frame-backed fallback for unscheduled parallel copies, and
+  destination-slot coalescing in the general spill path;
 - fail-closed validation of virtual and physical MIR.
 
 ## Does not own

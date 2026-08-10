@@ -137,24 +137,55 @@
                       {:gmir/predecessor :test.label/else-exit :gmir/value v2}]}
     {:gmir/op :gmir/return :gmir/value v3}]})
 
-(deftest v2-phi-lowers-to-one-dedicated-frame-slot
+(deftest single-phi-join-coalesces-to-direct-edge-moves
   (doseq [target mir/targets]
     (let [selected (mir/select-target target phi-program)
           allocated (mir/allocate-registers selected)
-          instructions (:mir/instructions allocated)
-          slot-zero-stores (filter #(and (= :mir/spill-store (:mir/op %))
-                                         (zero? (:mir/slot %)))
-                                   instructions)
-          slot-zero-loads (filter #(and (= :mir/spill-load (:mir/op %))
-                                        (zero? (:mir/slot %)))
-                                  instructions)]
+          instructions (:mir/instructions allocated)]
       (is (= 2 (:mir/version selected)))
-      (is (= 1 (:mir/frame-slots allocated)))
-      (is (= 2 (count slot-zero-stores)))
-      (is (= 1 (count slot-zero-loads)))
+      (is (zero? (:mir/frame-slots allocated)))
+      (is (= 2 (count (filter #(= :mir/move (:mir/op %)) instructions))))
+      (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load} (:mir/op %))
+                    instructions))
       (is (not-any? #(= :mir/phi (:mir/op %)) instructions))
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))
       (is (= allocated (mir/allocate-registers selected))))))
+
+(def dual-phi-program
+  (let [values (mapv gmir/vreg (range 8))
+        [test then-a then-b else-a else-b join-a join-b result] values]
+    {:gmir/version 2
+     :gmir/instructions
+     [{:gmir/op :gmir/argument :gmir/dst test :gmir/index 0}
+      {:gmir/op :gmir/branch-zero :gmir/test test :gmir/target :test.label/else}
+      {:gmir/op :gmir/label :gmir/id :test.label/then}
+      {:gmir/op :gmir/constant :gmir/dst then-a :gmir/value 1}
+      {:gmir/op :gmir/constant :gmir/dst then-b :gmir/value 2}
+      {:gmir/op :gmir/label :gmir/id :test.label/then-exit}
+      {:gmir/op :gmir/jump :gmir/target :test.label/join}
+      {:gmir/op :gmir/label :gmir/id :test.label/else}
+      {:gmir/op :gmir/constant :gmir/dst else-a :gmir/value 3}
+      {:gmir/op :gmir/constant :gmir/dst else-b :gmir/value 4}
+      {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
+      {:gmir/op :gmir/jump :gmir/target :test.label/join}
+      {:gmir/op :gmir/label :gmir/id :test.label/join}
+      {:gmir/op :gmir/phi :gmir/dst join-a
+       :gmir/incomings [{:gmir/predecessor :test.label/then-exit :gmir/value then-a}
+                        {:gmir/predecessor :test.label/else-exit :gmir/value else-a}]}
+      {:gmir/op :gmir/phi :gmir/dst join-b
+       :gmir/incomings [{:gmir/predecessor :test.label/then-exit :gmir/value then-b}
+                        {:gmir/predecessor :test.label/else-exit :gmir/value else-b}]}
+      {:gmir/op :gmir/add :gmir/dst result :gmir/left join-a :gmir/right join-b}
+      {:gmir/op :gmir/return :gmir/value result}]}))
+
+(deftest multi-phi-join-keeps-frame-fallback-without-parallel-copy-scheduler
+  (doseq [target mir/targets]
+    (let [allocated (->> dual-phi-program (mir/select-target target) mir/allocate-registers)
+          instructions (:mir/instructions allocated)]
+      (is (= 2 (:mir/frame-slots allocated)))
+      (is (= 4 (count (filter #(= :mir/spill-store (:mir/op %)) instructions))))
+      (is (= 2 (count (filter #(= :mir/spill-load (:mir/op %)) instructions))))
+      (is (not-any? #(= :mir/move (:mir/op %)) instructions)))))
 
 (deftest phi-merge-slots-remain-disjoint-from-general-spills
   (let [registers (mapv gmir/vreg (range 8))
@@ -186,9 +217,9 @@
                 {:gmir/op :gmir/add :gmir/dst result :gmir/left join-value :gmir/right e}
                 {:gmir/op :gmir/return :gmir/value result}]}
         allocated (->> input (mir/select-target :x86-64) mir/allocate-registers)
-        slot-zero (filter #(and (contains? % :mir/slot) (zero? (:mir/slot %)))
-                          (:mir/instructions allocated))]
-    (is (> (:mir/frame-slots allocated) 1))
-    (is (= 3 (count slot-zero))
-        "two edge stores and one join load own slot zero; spills start at one")
+        instructions (:mir/instructions allocated)]
+    (is (= 10 (:mir/frame-slots allocated))
+        "the phi destination owns its ordinary spill slot; no extra merge slot exists")
+    (is (not-any? #(= :mir/move (:mir/op %)) instructions)
+        "the general spill path coalesces slots instead of introducing moves")
     (is (not-any? #(= :mir/phi (:mir/op %)) (:mir/instructions allocated)))))
