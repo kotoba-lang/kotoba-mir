@@ -248,33 +248,51 @@
                                                 [slot (:mir/dst instruction)])
                                               phis))}))
 
-(defn- singleton-edge-merge-slots
-  "Return merge slots whose every predecessor edge transports exactly one phi.
-  Multi-phi edges need a parallel-copy scheduler and deliberately stay on the
-  frame-backed path until that scheduler exists."
-  [instructions merge-slots]
-  (let [merge-store? #(and (= :mir/spill-store (:mir/op %))
-                           (< (:mir/slot %) merge-slots))]
-    (let [{:keys [seen unsafe]}
-          (reduce (fn [{:keys [run seen unsafe] :as state} instruction]
-               (cond
-                 (merge-store? instruction)
-                 (assoc state :run (conj run (:mir/slot instruction)))
+(def ^:private parallel-copy-temp ::parallel-copy-temp)
 
-                 (= :mir/jump (:mir/op instruction))
-                 {:run []
-                  :seen (into seen run)
-                  :unsafe (if (<= 2 (count run)) (into unsafe run) unsafe)}
+(defn- remove-at [values index]
+  (into (subvec values 0 index) (subvec values (inc index))))
 
-                 :else
-                 (assoc state :run [])))
-                  {:run [] :seen #{} :unsafe #{}}
-                  instructions)]
-      (set (remove unsafe seen)))))
+(defn- schedule-parallel-copies
+  "Lower simultaneous physical-register copies deterministically. Acyclic
+  copies become moves. A cycle is broken with one reusable frame slot."
+  [copies temp-slot]
+  (loop [pending (vec (remove #(= (:mir/dst %) (:mir/src %)) copies))
+         out []
+         used-temp? false]
+    (if (empty? pending)
+      {:instructions out :used-temp? used-temp?}
+      (let [pending-sources (set (map :mir/src pending))
+            ready-index (first
+                         (keep-indexed
+                          (fn [index {:mir/keys [dst]}]
+                            (when-not (contains? pending-sources dst) index))
+                          pending))]
+        (if (some? ready-index)
+          (let [{:mir/keys [dst src]} (nth pending ready-index)
+                instruction (if (= parallel-copy-temp src)
+                              {:mir/op :mir/spill-load
+                               :mir/dst dst
+                               :mir/slot temp-slot}
+                              {:mir/op :mir/move :mir/dst dst :mir/src src})]
+            (recur (remove-at pending ready-index)
+                   (conj out instruction)
+                   used-temp?))
+          (let [{:mir/keys [src]} (first pending)]
+            (recur (mapv (fn [copy]
+                           (if (= src (:mir/src copy))
+                             (assoc copy :mir/src parallel-copy-temp)
+                             copy))
+                         pending)
+                   (conj out {:mir/op :mir/spill-store
+                              :mir/src src
+                              :mir/slot temp-slot})
+                   true)))))))
 
-(defn- coalesce-direct-phi-transports
-  "Replace safe single-phi edge stores and the corresponding join load with a
-  direct physical-register move. Remaining frame slots are compacted."
+(defn- coalesce-phi-transports
+  "Replace complete edge merge-store groups and their join loads with a
+  deterministic parallel-copy schedule. Invalid or incomplete groups retain
+  the frame-backed representation instead of being partially rewritten."
   [{:mir/keys [instructions frame-slots] :as program} merge-slots]
   (if (zero? merge-slots)
     program
@@ -286,37 +304,55 @@
                                    (filter #(and (= :mir/spill-store (:mir/op %))
                                                  (< (:mir/slot %) merge-slots))
                                            instructions))
-          singleton-edge-slots (singleton-edge-merge-slots instructions merge-slots)
-          candidates (->> (range merge-slots)
-                          (filter #(and (contains? singleton-edge-slots %)
-                                        (= 1 (count (get loads-by-slot %)))
-                                        (<= 2 (count (get stores-by-slot %)))))
-                          set)
+          candidates (set (range merge-slots))
+          complete? (every? #(and (= 1 (count (get loads-by-slot %)))
+                                  (<= 2 (count (get stores-by-slot %))))
+                            candidates)
           load-register (into {} (map (fn [slot]
                                         [slot (:mir/dst (first (get loads-by-slot slot)))])
                                       candidates))
           compact-slot (fn [slot]
                          (- slot (count (filter #(< % slot) candidates))))
-          rewritten
-          (mapcat (fn [{:mir/keys [op slot src dst] :as instruction}]
-                    (cond
-                      (and (= :mir/spill-store op) (contains? candidates slot))
-                      (let [target (get load-register slot)]
-                        (if (= target src)
-                          []
-                          [{:mir/op :mir/move :mir/dst target :mir/src src}]))
+          merge-store? #(and (= :mir/spill-store (:mir/op %))
+                             (contains? candidates (:mir/slot %)))]
+      (if-not complete?
+        program
+        (let [{:keys [out used-temp? valid?]}
+              (loop [remaining instructions, out [], used-temp? false]
+                (if-let [{:mir/keys [op slot] :as instruction} (first remaining)]
+                  (cond
+                    (merge-store? instruction)
+                    (let [[stores tail] (split-with merge-store? remaining)]
+                      (if (= :mir/jump (:mir/op (first tail)))
+                        (let [copies (mapv (fn [{:mir/keys [src slot]}]
+                                             {:mir/dst (get load-register slot)
+                                              :mir/src src})
+                                           stores)
+                              scheduled (schedule-parallel-copies
+                                         copies
+                                         (- frame-slots (count candidates)))]
+                          (recur tail
+                                 (into out (:instructions scheduled))
+                                 (or used-temp? (:used-temp? scheduled))))
+                        {:out out :used-temp? used-temp? :valid? false}))
 
-                      (and (= :mir/spill-load op) (contains? candidates slot))
-                      []
+                    (and (= :mir/spill-load op) (contains? candidates slot))
+                    (recur (next remaining) out used-temp?)
 
-                      (contains? instruction :mir/slot)
-                      [(assoc instruction :mir/slot (compact-slot slot))]
+                    (contains? instruction :mir/slot)
+                    (recur (next remaining)
+                           (conj out (assoc instruction :mir/slot (compact-slot slot)))
+                           used-temp?)
 
-                      :else [instruction]))
-                  instructions)]
-      (validate! (assoc program
-                        :mir/frame-slots (- frame-slots (count candidates))
-                        :mir/instructions (vec rewritten))))))
+                    :else
+                    (recur (next remaining) (conj out instruction) used-temp?))
+                  {:out out :used-temp? used-temp? :valid? true}))]
+          (if-not valid?
+            program
+            (validate! (assoc program
+                              :mir/frame-slots (+ (- frame-slots (count candidates))
+                                                  (if used-temp? 1 0))
+                              :mir/instructions (vec out)))))))))
 
 (defn- last-uses [instructions]
   (reduce-kv
@@ -461,7 +497,7 @@
   (validate! program)
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)]
     (try
-      (coalesce-direct-phi-transports
+      (coalesce-phi-transports
        (allocate-without-spills program merge-slots)
        merge-slots)
       (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error

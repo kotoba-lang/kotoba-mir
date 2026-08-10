@@ -178,14 +178,77 @@
       {:gmir/op :gmir/add :gmir/dst result :gmir/left join-a :gmir/right join-b}
       {:gmir/op :gmir/return :gmir/value result}]}))
 
-(deftest multi-phi-join-keeps-frame-fallback-without-parallel-copy-scheduler
+(deftest acyclic-multi-phi-join-coalesces-to-direct-edge-moves
   (doseq [target mir/targets]
     (let [allocated (->> dual-phi-program (mir/select-target target) mir/allocate-registers)
           instructions (:mir/instructions allocated)]
-      (is (= 2 (:mir/frame-slots allocated)))
-      (is (= 4 (count (filter #(= :mir/spill-store (:mir/op %)) instructions))))
-      (is (= 2 (count (filter #(= :mir/spill-load (:mir/op %)) instructions))))
-      (is (not-any? #(= :mir/move (:mir/op %)) instructions)))))
+      (is (zero? (:mir/frame-slots allocated)))
+      (is (= 2 (count (filter #(= :mir/move (:mir/op %)) instructions))))
+      (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load} (:mir/op %))
+                    instructions))
+      (is (= allocated
+             (->> dual-phi-program (mir/select-target target) mir/allocate-registers))))))
+
+(deftest cyclic-multi-phi-join-uses-one-reusable-temporary-slot
+  (doseq [target mir/targets]
+    (let [[r0 r1 r2] (get mir/physical-registers target)
+          schedule #'kotoba.mir/schedule-parallel-copies
+          swap (schedule [{:mir/dst r0 :mir/src r1}
+                          {:mir/dst r1 :mir/src r0}]
+                         7)
+          duplicate-source-cycle
+          (schedule [{:mir/dst r0 :mir/src r1}
+                     {:mir/dst r2 :mir/src r1}
+                     {:mir/dst r1 :mir/src r0}]
+                    7)]
+      (is (:used-temp? swap))
+      (is (= [{:mir/op :mir/spill-store :mir/src r1 :mir/slot 7}
+              {:mir/op :mir/move :mir/dst r1 :mir/src r0}
+              {:mir/op :mir/spill-load :mir/dst r0 :mir/slot 7}]
+             (:instructions swap)))
+      (is (= [{:mir/op :mir/move :mir/dst r2 :mir/src r1}
+              {:mir/op :mir/spill-store :mir/src r1 :mir/slot 7}
+              {:mir/op :mir/move :mir/dst r1 :mir/src r0}
+              {:mir/op :mir/spill-load :mir/dst r0 :mir/slot 7}]
+             (:instructions duplicate-source-cycle)))
+      (is (= swap
+             (schedule [{:mir/dst r0 :mir/src r1}
+                        {:mir/dst r1 :mir/src r0}]
+                       7))))))
+
+(defn- source-vectors [values width]
+  (if (zero? width)
+    [[]]
+    (mapcat (fn [value]
+              (map #(into [value] %)
+                   (source-vectors values (dec width))))
+            values)))
+
+(defn- execute-copy-schedule [register-state instructions]
+  (:registers
+   (reduce (fn [{:keys [registers temp] :as state}
+                {:mir/keys [op dst src]}]
+             (case op
+               :mir/move (assoc state :registers (assoc registers dst (get registers src)))
+               :mir/spill-store (assoc state :temp (get registers src))
+               :mir/spill-load (assoc state :registers (assoc registers dst temp))))
+           {:registers register-state :temp nil}
+           instructions)))
+
+(deftest parallel-copy-scheduler-preserves-all-four-register-mappings
+  (doseq [target mir/targets
+          :let [registers (get mir/physical-registers target)
+                initial (zipmap registers (range))]
+          sources (source-vectors registers (count registers))]
+    (let [copies (mapv (fn [dst src] {:mir/dst dst :mir/src src})
+                       registers sources)
+          scheduled (#'kotoba.mir/schedule-parallel-copies copies 0)
+          expected (reduce (fn [state {:mir/keys [dst src]}]
+                             (assoc state dst (get initial src)))
+                           initial copies)]
+      (is (= expected
+             (execute-copy-schedule initial (:instructions scheduled)))
+          (str target " " sources)))))
 
 (deftest phi-merge-slots-remain-disjoint-from-general-spills
   (let [registers (mapv gmir/vreg (range 8))
