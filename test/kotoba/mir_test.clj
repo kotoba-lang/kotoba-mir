@@ -30,7 +30,28 @@
           second-result (mir/allocate-registers selected)]
       (is (= first-result second-result))
       (is (= :physical (:mir/registers first-result)))
+      (is (zero? (:mir/frame-slots first-result)))
       (is (not-any? gmir/vreg? (tree-seq coll? seq first-result))))))
+
+(deftest allocation-spills-deterministically-when-the-scratch-profile-is-exhausted
+  (let [registers (mapv gmir/vreg (range 6))
+        program {:gmir/version 1
+                 :gmir/instructions
+                 (vec (concat
+                       (map-indexed (fn [index register]
+                                      {:gmir/op :gmir/constant :gmir/dst register
+                                       :gmir/value index})
+                                    registers)
+                       [{:gmir/op :gmir/add :gmir/dst (gmir/vreg 6)
+                         :gmir/left (first registers) :gmir/right (last registers)}
+                        {:gmir/op :gmir/return :gmir/value (gmir/vreg 6)}]))}
+        allocated (->> program (mir/select-target :x86-64) mir/allocate-registers)]
+    (is (= 7 (:mir/frame-slots allocated)))
+    (is (= allocated
+           (->> program (mir/select-target :x86-64) mir/allocate-registers)))
+    (is (some #(= :mir/spill-store (:mir/op %)) (:mir/instructions allocated)))
+    (is (some #(= :mir/spill-load (:mir/op %)) (:mir/instructions allocated)))
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
 
 (deftest allocation-fails-closed
   (testing "use before definition"
@@ -39,6 +60,24 @@
                        :gmir/instructions [{:gmir/op :gmir/return :gmir/value v0}]}
                       (mir/select-target :x86-64)
                       mir/allocate-registers))))
+  (testing "spill fallback cannot make a future definition visible"
+    (let [registers (mapv gmir/vreg (range 7))]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (->> {:gmir/version 1
+                         :gmir/instructions
+                         (vec (concat
+                               (map-indexed (fn [index register]
+                                              {:gmir/op :gmir/constant
+                                               :gmir/dst register
+                                               :gmir/value index})
+                                            (take 5 registers))
+                               [{:gmir/op :gmir/return
+                                 :gmir/value (last registers)}
+                                {:gmir/op :gmir/constant
+                                 :gmir/dst (last registers)
+                                 :gmir/value 6}]))}
+                        (mir/select-target :x86-64)
+                        mir/allocate-registers)))))
   (testing "foreign physical registers"
     (is (thrown? clojure.lang.ExceptionInfo
                  (mir/validate!

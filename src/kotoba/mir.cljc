@@ -17,6 +17,8 @@
   {:mir/argument #{:mir/op :mir/dst :mir/index}
    :mir/constant #{:mir/op :mir/dst :mir/value}
    :mir/add #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/spill-load #{:mir/op :mir/dst :mir/slot}
+   :mir/spill-store #{:mir/op :mir/src :mir/slot}
    :mir/label #{:mir/op :mir/id}
    :mir/branch-zero #{:mir/op :mir/test :mir/target}
    :mir/jump #{:mir/op :mir/target}
@@ -27,14 +29,20 @@
 
 (defn validate!
   "Validate virtual or physical MIR and return it unchanged."
-  [{:mir/keys [version target registers instructions] :as program}]
+  [{:mir/keys [version target registers instructions frame-slots] :as program}]
   (when-not (and (map? program)
-                 (= #{:mir/version :mir/target :mir/registers :mir/instructions}
-                    (set (keys program)))
+                 (contains? #{#{:mir/version :mir/target :mir/registers :mir/instructions}
+                              #{:mir/version :mir/target :mir/registers :mir/instructions
+                                :mir/frame-slots}}
+                            (set (keys program)))
                  (= 1 version)
                  (contains? targets target)
                  (contains? #{:virtual :physical} registers)
-                 (vector? instructions))
+                 (vector? instructions)
+                 (or (nil? frame-slots)
+                     (and (= :physical registers)
+                          (integer? frame-slots)
+                          (<= 0 frame-slots 4095))))
     (reject! :non-canonical-program program))
   (let [register? (if (= :virtual registers)
                     gmir/vreg?
@@ -43,7 +51,10 @@
       (let [op (:mir/op instruction)]
         (when-not (= (get instruction-keysets op) (set (keys instruction)))
           (reject! :non-canonical-instruction instruction))
-        (doseq [register (keep instruction [:mir/dst :mir/left :mir/right :mir/test])]
+        (when (and (= :virtual registers)
+                   (contains? #{:mir/spill-load :mir/spill-store} op))
+          (reject! :spill-in-virtual-program instruction))
+        (doseq [register (keep instruction [:mir/dst :mir/src :mir/left :mir/right :mir/test])]
           (when-not (register? register)
             (reject! :register-profile-violation instruction)))
         (when (and (= op :mir/return) (not (register? (:mir/value instruction))))
@@ -55,6 +66,12 @@
                    (not (and (integer? (:mir/index instruction))
                              (not (neg? (:mir/index instruction))))))
           (reject! :argument-index-invalid instruction))
+        (when (contains? #{:mir/spill-load :mir/spill-store} op)
+          (when-not (and (integer? (:mir/slot instruction))
+                         (some? frame-slots)
+                         (<= 0 (:mir/slot instruction))
+                         (< (:mir/slot instruction) frame-slots))
+            (reject! :spill-slot-invalid instruction)))
         (when (contains? #{:mir/label :mir/branch-zero :mir/jump} op)
           (let [id (if (= op :mir/label) (:mir/id instruction) (:mir/target instruction))]
             (when-not (gmir/label? id)
@@ -101,7 +118,7 @@
           (:gmir/instructions program))}))
 
 (defn- sources [instruction]
-  (keep instruction [:mir/left :mir/right :mir/test :mir/value]))
+  (keep instruction [:mir/src :mir/left :mir/right :mir/test :mir/value]))
 
 (defn- last-uses [instructions]
   (reduce-kv
@@ -109,8 +126,7 @@
      (reduce #(assoc %1 %2 index) uses (filter gmir/vreg? (sources instruction))))
    {} instructions))
 
-(defn allocate-registers
-  "Allocate virtual MIR onto the target's ordered v1 scratch profile."
+(defn- allocate-without-spills
   [{:mir/keys [target registers instructions] :as program}]
   (validate! program)
   (when-not (= :virtual registers)
@@ -151,4 +167,81 @@
          {:mir/version version
           :mir/target target
           :mir/registers :physical
+          :mir/frame-slots 0
           :mir/instructions out})))))
+
+(defn- spill-slots [instructions]
+  (:slots
+   (reduce (fn [{:keys [slots defined] :as state}
+                {:mir/keys [dst] :as instruction}]
+             (doseq [source (filter gmir/vreg? (sources instruction))]
+               (when-not (contains? defined source)
+                 (reject! :use-before-definition instruction)))
+             (if (gmir/vreg? dst)
+               (do
+                 (when (contains? defined dst)
+                   (reject! :multiple-definition instruction))
+                 {:slots (assoc slots dst (count slots))
+                  :defined (conj defined dst)})
+               state))
+           {:slots {} :defined #{}}
+           instructions)))
+
+(defn- allocate-with-spills
+  [{:mir/keys [target instructions] :as program}]
+  (let [slots (spill-slots instructions)
+        slot-count (count slots)
+        [r0 r1] (get physical-registers target)]
+    (when (> slot-count 4095)
+      (reject! :spill-frame-too-large {:frame-slots slot-count}))
+    (letfn [(slot-of [instruction value]
+              (or (get slots value)
+                  (reject! :use-before-definition instruction)))
+            (load-value [instruction value register]
+              {:mir/op :mir/spill-load :mir/dst register
+               :mir/slot (slot-of instruction value)})
+            (store-value [instruction value register]
+              {:mir/op :mir/spill-store :mir/src register
+               :mir/slot (slot-of instruction value)})]
+      (validate!
+       {:mir/version version
+        :mir/target target
+        :mir/registers :physical
+        :mir/frame-slots slot-count
+        :mir/instructions
+        (vec
+         (mapcat
+          (fn [{:mir/keys [op dst left right test value] :as instruction}]
+            (case op
+              (:mir/argument :mir/constant)
+              [(assoc instruction :mir/dst r0)
+               (store-value instruction dst r0)]
+
+              :mir/add
+              [(load-value instruction left r0)
+               (load-value instruction right r1)
+               {:mir/op :mir/add :mir/dst r0 :mir/left r0 :mir/right r1}
+               (store-value instruction dst r0)]
+
+              :mir/branch-zero
+              [(load-value instruction test r0)
+               (assoc instruction :mir/test r0)]
+
+              :mir/return
+              [(load-value instruction value r0)
+               (assoc instruction :mir/value r0)]
+
+              (:mir/label :mir/jump) [instruction]
+              (reject! :unsupported-spill-operation instruction)))
+          instructions))}))))
+
+(defn allocate-registers
+  "Allocate virtual MIR deterministically, inserting bounded stack-slot spills
+  when the target scratch profile is exhausted."
+  [program]
+  (try
+    (allocate-without-spills program)
+    (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
+      (if (= :spill-required (:problem (ex-data error)))
+        (allocate-with-spills program)
+        (throw error)))))
