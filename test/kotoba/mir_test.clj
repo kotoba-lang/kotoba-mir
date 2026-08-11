@@ -707,3 +707,63 @@
                     (assoc-in allocated
                               [:mir/functions 0 :mir/instructions 0 :mir/dst]
                               :x86-64/rax)))))))
+
+(deftest runtime-call-selection-owns-context-offsets-and-runtime-abi
+  (let [program {:gmir/version 1
+                 :gmir/instructions
+                 [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                  {:gmir/op :gmir/runtime-call :gmir/dst v1
+                   :gmir/runtime :vector-count :gmir/arguments [v0]}
+                  {:gmir/op :gmir/add :gmir/dst v2
+                   :gmir/left v0 :gmir/right v1}
+                  {:gmir/op :gmir/return :gmir/value v2}]}]
+    (doseq [target mir/targets]
+      (let [selected (mir/select-target target program)
+            virtual-call (second (:mir/instructions selected))
+            allocated (mir/allocate-registers selected)
+            call (first (filter #(= :mir/runtime-call (:mir/op %))
+                                (:mir/instructions allocated)))]
+        (is (= 168 (:mir/context-offset virtual-call)) target)
+        (is (= :vector-count (:mir/runtime call)) target)
+        (is (= (get mir/return-registers target) (:mir/dst call)) target)
+        (is (= (subvec (get mir/runtime-argument-registers target) 0 1)
+               (:mir/arguments call)) target)
+        (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target)
+        (testing "the selected context offset cannot drift"
+          (is (thrown? clojure.lang.ExceptionInfo
+                       (mir/validate! (update-in allocated [:mir/instructions]
+                                                 (fn [instructions]
+                                                   (mapv #(if (= :mir/runtime-call
+                                                                  (:mir/op %))
+                                                            (assoc % :mir/context-offset 176)
+                                                            %)
+                                                         instructions)))))
+              target))))))
+
+(deftest v3-runtime-call-preserves-values-live-across-the-host-boundary
+  (let [module {:gmir/version 3
+                :gmir/entry 'main
+                :gmir/functions
+                [{:gmir/name 'main :gmir/arity 1
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                   {:gmir/op :gmir/runtime-call :gmir/dst v1
+                    :gmir/runtime :vector-count :gmir/arguments [v0]}
+                   {:gmir/op :gmir/add :gmir/dst v2
+                    :gmir/left v0 :gmir/right v1}
+                   {:gmir/op :gmir/return :gmir/value v2}]}]}]
+    (doseq [target mir/targets]
+      (let [function (->> module
+                          (mir/select-target target)
+                          mir/allocate-registers
+                          :mir/functions
+                          first)
+            instructions (:mir/instructions function)]
+        (is (= :call-live (:mir/frame-policy function)) target)
+        (is (= 1 (:mir/frame-slots function)) target)
+        (is (= [0] (mapv :mir/slot
+                         (filter #(= :mir/spill-store (:mir/op %))
+                                 instructions))) target)
+        (is (= [0] (mapv :mir/slot
+                         (filter #(= :mir/spill-load (:mir/op %))
+                                 instructions))) target)))))
