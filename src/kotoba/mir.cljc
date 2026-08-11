@@ -51,6 +51,7 @@
 (def instruction-keysets
   {:mir/argument #{:mir/op :mir/dst :mir/index}
    :mir/constant #{:mir/op :mir/dst :mir/value}
+   :mir/data-address #{:mir/op :mir/dst :mir/content}
    :mir/add #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/subtract #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/multiply #{:mir/op :mir/dst :mir/left :mir/right}
@@ -246,6 +247,9 @@
         (when (and (= op :mir/constant)
                    (not (gmir/i64-value? (:mir/value instruction))))
           (reject! :constant-not-i64 instruction))
+        (when (and (= op :mir/data-address)
+                   (not (string? (:mir/content instruction))))
+          (reject! :invalid-data-content instruction))
         (when (and (= op :mir/argument)
                    (not (and (integer? (:mir/index instruction))
                              (not (neg? (:mir/index instruction))))))
@@ -289,6 +293,7 @@
                                 :mir/test :gmir/test
                                 :mir/target :gmir/target
                                 :mir/incomings :gmir/incomings
+                                :mir/content :gmir/content
                                 :mir/runtime :gmir/runtime
                                 :mir/capability :gmir/capability
                                 :mir/kind :gmir/kind
@@ -371,7 +376,7 @@
                             :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
                             :mir/greater-or-equal :mir/call :mir/runtime-call
-                            :mir/capability-call}]
+                            :mir/capability-call :mir/data-address}]
             (doseq [[index instruction] (map-indexed vector instructions)
                     :when (contains? value-ops (:mir/op instruction))]
               (let [store (get instructions (inc index))]
@@ -423,6 +428,7 @@
               :gmir/test :mir/test
               :gmir/target :mir/target
               :gmir/incomings :mir/incomings
+              :gmir/content :mir/content
               :gmir/callee :mir/callee
               :gmir/runtime :mir/runtime
               :gmir/capability :mir/capability
@@ -1023,6 +1029,10 @@
                  (store-value instruction dst register)])
 
               :mir/constant
+              [(assoc instruction :mir/dst r0)
+               (store-value instruction dst r0)]
+
+              :mir/data-address
               [(assoc instruction :mir/dst r0)
                (store-value instruction dst r0)]
 

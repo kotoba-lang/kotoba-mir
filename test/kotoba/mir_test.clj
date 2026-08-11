@@ -740,6 +740,20 @@
                                                          instructions)))))
               target))))))
 
+(deftest immutable-data-address-selection-preserves-content
+  (let [program {:gmir/version 1
+                 :gmir/instructions
+                 [{:gmir/op :gmir/data-address :gmir/dst v0
+                   :gmir/content "hello😀"}
+                  {:gmir/op :gmir/return :gmir/value v0}]}]
+    (doseq [target mir/targets]
+      (let [selected (mir/select-target target program)
+            allocated (mir/allocate-registers selected)
+            literal (first (:mir/instructions allocated))]
+        (is (= :mir/data-address (:mir/op literal)) target)
+        (is (= "hello😀" (:mir/content literal)) target)
+        (is (= (name target) (namespace (:mir/dst literal))) target)))))
+
 (deftest v3-runtime-call-preserves-values-live-across-the-host-boundary
   (let [module {:gmir/version 3
                 :gmir/entry 'main
