@@ -275,26 +275,32 @@
           (mapv (fn [instruction]
                   (reduce-kv
                    (fn [out key value]
-                     (assoc out
-                            (case key
-                              :mir/op :gmir/op
-                              :mir/dst :gmir/dst
-                              :mir/index :gmir/index
-                              :mir/value :gmir/value
-                              :mir/left :gmir/left
-                              :mir/right :gmir/right
-                              :mir/id :gmir/id
-                              :mir/test :gmir/test
-                              :mir/target :gmir/target
-                              :mir/incomings :gmir/incomings)
-                            (cond
-                              (= key :mir/op) (keyword "gmir" (name value))
-                              (= key :mir/incomings)
-                              (mapv (fn [incoming]
-                                      {:gmir/predecessor (:mir/predecessor incoming)
-                                       :gmir/value (:mir/value incoming)})
-                                    value)
-                              :else value)))
+                     (if (= key :mir/context-offset)
+                       out
+                       (assoc out
+                              (case key
+                                :mir/op :gmir/op
+                                :mir/dst :gmir/dst
+                                :mir/index :gmir/index
+                                :mir/value :gmir/value
+                                :mir/left :gmir/left
+                                :mir/right :gmir/right
+                                :mir/id :gmir/id
+                                :mir/test :gmir/test
+                                :mir/target :gmir/target
+                                :mir/incomings :gmir/incomings
+                                :mir/runtime :gmir/runtime
+                                :mir/capability :gmir/capability
+                                :mir/kind :gmir/kind
+                                :mir/arguments :gmir/arguments)
+                              (cond
+                                (= key :mir/op) (keyword "gmir" (name value))
+                                (= key :mir/incomings)
+                                (mapv (fn [incoming]
+                                        {:gmir/predecessor (:mir/predecessor incoming)
+                                         :gmir/value (:mir/value incoming)})
+                                      value)
+                                :else value))))
                    {} instruction))
                 instructions)}))))
   program)
