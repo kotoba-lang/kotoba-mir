@@ -58,8 +58,7 @@
    :mir/subtract #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/multiply #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/quotient #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/quotient-constant #{:mir/op :mir/dst :mir/left :mir/right
-                            :mir/divisor}
+   :mir/quotient-constant #{:mir/op :mir/dst :mir/left :mir/divisor}
    :mir/bit-and #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/bit-or #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/bit-xor #{:mir/op :mir/dst :mir/left :mir/right}
@@ -483,31 +482,54 @@
      {})
    instruction))
 
+(defn- instruction-sources [instruction]
+  (concat (keep instruction [:mir/src :mir/input :mir/left :mir/right
+                             :mir/test :mir/value :mir/base :mir/length
+                             :mir/stored :mir/offset :mir/size])
+          (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
+                             :mir/kernel-load-u32 :mir/kernel-store-u32}
+                           (:mir/op instruction))
+            [(:mir/index instruction)])
+          (when (vector? (:mir/arguments instruction))
+            (:mir/arguments instruction))))
+
 (defn- select-instructions
   "Select one function while retaining SSA constants long enough to choose a
-  target-independent constant-divisor operation. The original right vreg is
-  retained in MIR so existing allocation/liveness rules remain conservative;
-  MC encoding may replace the hardware divide with a proven reciprocal
-  sequence."
+  target-independent constant-divisor operation. A divisor vreg disappears
+  from the closed operation after its literal value is captured. Its constant
+  definition is removed only when no other selected instruction consumes it."
   [target instructions constant-division?]
-  (:out
-   (reduce
-    (fn [{:keys [constants out]} instruction]
-      (let [selected (select-instruction target instruction)
-            selected (if (and constant-division?
-                              (= :gmir/quotient (:gmir/op instruction))
-                              (contains? constants (:gmir/right instruction)))
-                       (assoc selected
-                              :mir/op :mir/quotient-constant
-                              :mir/divisor (get constants (:gmir/right instruction)))
-                       selected)
-            constants (if (= :gmir/constant (:gmir/op instruction))
-                        (assoc constants (:gmir/dst instruction)
-                               (:gmir/value instruction))
-                        constants)]
-        {:constants constants :out (conj out selected)}))
-    {:constants {} :out []}
-    instructions)))
+  (let [{:keys [out specialized-divisors]}
+        (reduce
+         (fn [{:keys [constants out specialized-divisors]} instruction]
+           (let [right (:gmir/right instruction)
+                 specialized? (and constant-division?
+                                   (= :gmir/quotient (:gmir/op instruction))
+                                   (contains? constants right))
+                 selected (select-instruction target instruction)
+                 selected (if specialized?
+                            (-> selected
+                                (assoc :mir/op :mir/quotient-constant
+                                       :mir/divisor (get constants right))
+                                (dissoc :mir/right))
+                            selected)
+                 constants (if (= :gmir/constant (:gmir/op instruction))
+                             (assoc constants (:gmir/dst instruction)
+                                    (:gmir/value instruction))
+                             constants)]
+             {:constants constants
+              :specialized-divisors (cond-> specialized-divisors
+                                      specialized? (conj right))
+              :out (conj out selected)}))
+         {:constants {} :specialized-divisors #{} :out []}
+         instructions)
+        live-sources (set (mapcat instruction-sources out))]
+    (->> out
+         (remove (fn [{:mir/keys [op dst]}]
+                   (and (= :mir/constant op)
+                        (contains? specialized-divisors dst)
+                        (not (contains? live-sources dst)))))
+         vec)))
 
 (defn select-target
   "Select the closed GMIR operation set into target MIR, preserving vregs."
@@ -540,15 +562,7 @@
                               (:gmir/instructions program))})))
 
 (defn- sources [instruction]
-  (concat (keep instruction [:mir/src :mir/input :mir/left :mir/right
-                             :mir/test :mir/value :mir/base :mir/length
-                             :mir/stored :mir/offset :mir/size])
-          (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
-                             :mir/kernel-load-u32 :mir/kernel-store-u32}
-                           (:mir/op instruction))
-            [(:mir/index instruction)])
-          (when (vector? (:mir/arguments instruction))
-            (:mir/arguments instruction))))
+  (instruction-sources instruction))
 
 (defn- preceding-label [instructions index]
   (loop [cursor (dec index)]
@@ -1109,8 +1123,13 @@
               :mir/merge-load
               []
 
+              :mir/quotient-constant
+              [(load-value instruction left r0)
+               {:mir/op op :mir/dst r0 :mir/left r0
+                :mir/divisor (:mir/divisor instruction)}
+               (store-value instruction dst r0)]
+
               (:mir/add :mir/subtract :mir/multiply :mir/quotient
-               :mir/quotient-constant
                :mir/bit-and :mir/bit-or :mir/bit-xor
                :mir/shift-left :mir/shift-right-signed :mir/shift-right-unsigned
                :mir/f64-add :mir/f64-subtract :mir/f64-multiply
@@ -1122,9 +1141,7 @@
                :mir/less-or-equal :mir/greater-or-equal)
               [(load-value instruction left r0)
                (load-value instruction right r1)
-               (cond-> {:mir/op op :mir/dst r0 :mir/left r0 :mir/right r1}
-                 (= :mir/quotient-constant op)
-                 (assoc :mir/divisor (:mir/divisor instruction)))
+               {:mir/op op :mir/dst r0 :mir/left r0 :mir/right r1}
                (store-value instruction dst r0)]
 
               :mir/f64-sqrt
