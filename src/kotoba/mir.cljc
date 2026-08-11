@@ -14,6 +14,19 @@
   {:x86-64 [:x86-64/rdi :x86-64/rsi :x86-64/rdx :x86-64/rcx :x86-64/r8]
    :aarch64 [:aarch64/x0 :aarch64/x1 :aarch64/x2 :aarch64/x3 :aarch64/x4]})
 
+(def runtime-argument-registers
+  {:x86-64 [:x86-64/rsi :x86-64/rdx :x86-64/rcx]
+   :aarch64 [:aarch64/x1 :aarch64/x2 :aarch64/x3]})
+
+(def runtime-context-offsets
+  {:pair 56 :pair-first 64 :pair-second 72
+   :kgraph-assert! 80 :kgraph-get 88 :kgraph-count 96
+   :kgraph-entity-at 104
+   :string-byte-length 72 :string=? 112 :string-concat 120
+   :string-substring 136 :string-code-point-at 144
+   :vector-new-empty 152 :vector-conj 160 :vector-count 168
+   :vector-at 176 :vector-assoc 184 :vector-drop 192})
+
 (def return-registers
   {:x86-64 :x86-64/rax
    :aarch64 :aarch64/x0})
@@ -71,6 +84,8 @@
    :mir/jump #{:mir/op :mir/target}
    :mir/phi #{:mir/op :mir/dst :mir/incomings}
    :mir/call #{:mir/op :mir/dst :mir/callee :mir/arguments}
+   :mir/runtime-call #{:mir/op :mir/dst :mir/runtime :mir/context-offset
+                       :mir/arguments}
    :mir/return #{:mir/op :mir/value}})
 
 (def ^:private v1-operations
@@ -93,6 +108,15 @@
   (contains? (set (concat (get physical-registers target)
                           (get call-argument-registers target)))
              value))
+
+(defn- call-operation? [op]
+  (contains? #{:mir/call :mir/runtime-call} op))
+
+(defn- argument-registers-for-call [target op]
+  (get (if (= :mir/runtime-call op)
+         runtime-argument-registers
+         call-argument-registers)
+       target))
 
 (defn- validate-flat!
   [{:mir/keys [version target registers instructions frame-slots] :as program}]
@@ -170,6 +194,22 @@
                               (subvec (get call-argument-registers target)
                                       0 (count (:mir/arguments instruction)))))
               (reject! :physical-call-profile-violation instruction))))
+        (when (= op :mir/runtime-call)
+          (let [runtime (:mir/runtime instruction)
+                arguments (:mir/arguments instruction)
+                expected (get gmir/runtime-operation-arities runtime ::missing)]
+            (when-not (and (not= ::missing expected)
+                           (= expected (count arguments))
+                           (= (get runtime-context-offsets runtime)
+                              (:mir/context-offset instruction)))
+              (reject! :invalid-runtime-call instruction))
+            (when (= :physical registers)
+              (when-not (and (= (:mir/dst instruction)
+                                (get return-registers target))
+                             (= arguments
+                                (subvec (get runtime-argument-registers target)
+                                        0 (count arguments))))
+                (reject! :physical-runtime-call-profile-violation instruction)))))
         (when (and (= op :mir/constant)
                    (not (gmir/i64-value? (:mir/value instruction))))
           (reject! :constant-not-i64 instruction))
@@ -249,7 +289,8 @@
                             #{:mir/name :mir/arity :mir/instructions}
                             #{:mir/name :mir/arity :mir/frame-slots
                               :mir/frame-policy :mir/instructions})
-            calls (filter #(= :mir/call (:mir/op %)) instructions)]
+            calls (filter #(call-operation? (:mir/op %)) instructions)
+            direct-calls (filter #(= :mir/call (:mir/op %)) instructions)]
         (when-not (and (= expected-keys (set (keys function)))
                        (gmir/function-id? name)
                        (integer? arity) (<= 0 arity 5)
@@ -290,7 +331,7 @@
                             :mir/kernel-subregion
                             :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
-                            :mir/greater-or-equal :mir/call}]
+                            :mir/greater-or-equal :mir/call :mir/runtime-call}]
             (doseq [[index instruction] (map-indexed vector instructions)
                     :when (contains? value-ops (:mir/op instruction))]
               (let [store (get instructions (inc index))]
@@ -300,7 +341,7 @@
                            {:function name :instruction instruction}))))
             (doseq [[index {:mir/keys [arguments] :as call}]
                     (map-indexed vector instructions)
-                    :when (= :mir/call (:mir/op call))]
+                    :when (call-operation? (:mir/op call))]
               (let [loads (when (>= index (count arguments))
                             (subvec instructions (- index (count arguments)) index))]
                 (when-not (and (some? loads)
@@ -309,7 +350,7 @@
                                (= arguments (mapv :mir/dst loads)))
                   (reject! :non-parallel-call-arguments
                            {:function name :call call}))))))
-        (doseq [{:mir/keys [callee arguments] :as call} calls]
+        (doseq [{:mir/keys [callee arguments] :as call} direct-calls]
           (let [callee-arity (get signatures callee ::missing)]
             (when (= ::missing callee-arity)
               (reject! :unresolved-callee call))
@@ -326,7 +367,7 @@
     (validate-v3-module! program)
     (validate-flat! program)))
 
-(defn- select-instruction [instruction]
+(defn- select-instruction [target instruction]
   (reduce-kv
    (fn [out key value]
      (assoc out
@@ -343,6 +384,7 @@
               :gmir/target :mir/target
               :gmir/incomings :mir/incomings
               :gmir/callee :mir/callee
+              :gmir/runtime :mir/runtime
               :gmir/arguments :mir/arguments
               :gmir/base :mir/base
               :gmir/length :mir/length
@@ -358,7 +400,11 @@
                        :mir/value (:gmir/value incoming)})
                     value)
               :else value)))
-   {} instruction))
+   (if (= :gmir/runtime-call (:gmir/op instruction))
+     {:mir/context-offset (get runtime-context-offsets
+                                (:gmir/runtime instruction))}
+     {})
+   instruction))
 
 (defn select-target
   "Select the closed GMIR operation set into target MIR, preserving vregs."
@@ -375,12 +421,12 @@
       :mir/functions
       (mapv (fn [{:gmir/keys [name arity instructions]}]
               {:mir/name name :mir/arity arity
-               :mir/instructions (mapv select-instruction instructions)})
+               :mir/instructions (mapv #(select-instruction target %) instructions)})
             (:gmir/functions program))}
      {:mir/version (:gmir/version program)
       :mir/target target
       :mir/registers :virtual
-      :mir/instructions (mapv select-instruction
+      :mir/instructions (mapv #(select-instruction target %)
                               (:gmir/instructions program))})))
 
 (defn- sources [instruction]
@@ -640,7 +686,7 @@
   (let [last-use (last-uses instructions)
         call-indexes (->> instructions
                           (keep-indexed (fn [index instruction]
-                                          (when (= :mir/call (:mir/op instruction))
+                                          (when (call-operation? (:mir/op instruction))
                                             index)))
                           vec)
         definitions (->> instructions
@@ -657,7 +703,7 @@
     (into {} (map-indexed (fn [slot [value _]] [value slot]) crossing))))
 
 (defn- straight-line-call-program? [instructions]
-  (and (some #(= :mir/call (:mir/op %)) instructions)
+  (and (some #(call-operation? (:mir/op %)) instructions)
        (not-any? #(contains? #{:mir/label :mir/branch-zero :mir/jump :mir/phi}
                              (:mir/op %))
                  instructions)))
@@ -672,7 +718,6 @@
   (let [last-use (last-uses instructions)
         call-slots (call-live-slots instructions)
         allocator-registers (get physical-registers target)
-        argument-registers (get call-argument-registers target)
         return-register (get return-registers target)]
     (let [entry (entry-argument-plan target instructions last-use
                                      (count call-slots) call-slots)
@@ -715,7 +760,7 @@
       (let [result
             (reduce
              (fn [state [index {:mir/keys [op dst arguments] :as instruction}]]
-               (if (= :mir/call op)
+               (if (call-operation? op)
                  (let [missing (remove #(or (contains? (:assigned state) %)
                                             (and (contains? slots %)
                                                  (contains? (:materialized state) %)))
@@ -733,7 +778,8 @@
                                        :mir/src (get-in state [:assigned value])
                                        :mir/slot (get slots value)})
                                     to-store)
-                       call-registers (subvec argument-registers 0 (count arguments))
+                       call-registers (subvec (argument-registers-for-call target op)
+                                              0 (count arguments))
                        copies (->> (map vector arguments call-registers)
                                    (keep (fn [[value register]]
                                            (when-let [source (get-in state
@@ -748,9 +794,14 @@
                                              :mir/dst register
                                              :mir/slot (get slots value)})))
                                   vec)
-                       call {:mir/op :mir/call :mir/dst return-register
-                             :mir/callee (:mir/callee instruction)
-                             :mir/arguments call-registers}
+                       call (cond-> {:mir/op op :mir/dst return-register
+                                     :mir/arguments call-registers}
+                              (= :mir/call op)
+                              (assoc :mir/callee (:mir/callee instruction))
+                              (= :mir/runtime-call op)
+                              (assoc :mir/runtime (:mir/runtime instruction)
+                                     :mir/context-offset
+                                     (:mir/context-offset instruction)))
                        state (-> state
                                  (update :out into stores)
                                  (update :out into (:instructions scheduled))
@@ -983,16 +1034,20 @@
               [(load-value instruction test r0)
                (assoc instruction :mir/test r0)]
 
-              :mir/call
-              (let [call-registers (subvec argument-registers 0 (count arguments))]
+              (:mir/call :mir/runtime-call)
+              (let [call-registers (subvec (argument-registers-for-call target op)
+                                           0 (count arguments))]
                 (concat
                  (mapv (fn [value register]
                          (load-value instruction value register))
                        arguments call-registers)
-                 [{:mir/op :mir/call
-                   :mir/dst (get return-registers target)
-                   :mir/callee callee
-                   :mir/arguments call-registers}
+                 [(cond-> {:mir/op op
+                           :mir/dst (get return-registers target)
+                           :mir/arguments call-registers}
+                    (= :mir/call op) (assoc :mir/callee callee)
+                    (= :mir/runtime-call op)
+                    (assoc :mir/runtime (:mir/runtime instruction)
+                           :mir/context-offset (:mir/context-offset instruction)))
                   (store-value instruction dst (get return-registers target))]))
 
               :mir/return
@@ -1009,7 +1064,7 @@
   [program]
   (validate-flat! program)
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)]
-    (if (some #(= :mir/call (:mir/op %)) (:mir/instructions program))
+    (if (some #(call-operation? (:mir/op %)) (:mir/instructions program))
       (allocate-with-spills program merge-dst-by-slot)
       (try
         (coalesce-phi-transports
@@ -1039,7 +1094,7 @@
         :mir/entry entry
         :mir/functions
         (mapv (fn [{:mir/keys [name arity instructions]}]
-                (let [calls? (some #(= :mir/call (:mir/op %)) instructions)
+                (let [calls? (some #(call-operation? (:mir/op %)) instructions)
                       virtual {:mir/version 3 :mir/target target
                                :mir/registers :virtual
                                :mir/instructions instructions}
