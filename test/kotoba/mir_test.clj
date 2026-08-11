@@ -768,6 +768,32 @@
                          (filter #(= :mir/spill-load (:mir/op %))
                                  instructions))) target)))))
 
+(deftest v2-control-flow-validates-with-host-calls
+  (doseq [target mir/targets
+          call [{:gmir/op :gmir/runtime-call :gmir/dst v1
+                 :gmir/runtime :pair-first :gmir/arguments [v0]}
+                {:gmir/op :gmir/capability-call :gmir/dst v1
+                 :gmir/capability 7 :gmir/kind :i64
+                 :gmir/arguments [v0]}]]
+    (let [then-label :kotoba.gmir.label/then
+          end-label :kotoba.gmir.label/end
+          program {:gmir/version 2
+                   :gmir/instructions
+                   [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                    call
+                    {:gmir/op :gmir/branch-zero :gmir/test v1
+                     :gmir/target then-label}
+                    {:gmir/op :gmir/jump :gmir/target end-label}
+                    {:gmir/op :gmir/label :gmir/id then-label}
+                    {:gmir/op :gmir/label :gmir/id end-label}
+                    {:gmir/op :gmir/return :gmir/value v0}]}
+          selected (mir/select-target target program)
+          allocated (mir/allocate-registers selected)]
+      (is (= 2 (:mir/version selected)) [target (:gmir/op call)])
+      (is (= :physical (:mir/registers allocated)) [target (:gmir/op call)])
+      (is (some :mir/context-offset (:mir/instructions allocated))
+          [target (:gmir/op call)]))))
+
 (deftest capability-call-selection-owns-kind-specific-context-and-abi
   (doseq [target mir/targets
           kind (keys gmir/capability-kinds)]
