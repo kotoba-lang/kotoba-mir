@@ -22,8 +22,9 @@ physical register state.
   all-vreg preservation;
 - canonical ABI input markers plus parallel function-entry assignment: four
   simultaneously used scalar parameters stay in registers with a zero-slot
-  frame on x86-64 and AArch64, while five-live-parameter pressure retains the
-  deterministic all-vreg fallback;
+  frame on x86-64 and AArch64; a fifth live parameter is stored directly from
+  its ABI input into one stable slot and loaded lazily, including direct
+  restoration into the fifth outgoing call register;
 
 ## Does not own
 
