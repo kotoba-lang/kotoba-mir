@@ -50,6 +50,59 @@
       (is (= (keyword "mir" (name op))
              (get-in allocated [:mir/instructions 2 :mir/op]))))))
 
+(deftest selection-and-allocation-cover-the-f64-family
+  (doseq [target mir/targets
+          op [:gmir/f64-add :gmir/f64-subtract :gmir/f64-multiply
+              :gmir/f64-divide :gmir/f64-min :gmir/f64-max
+              :gmir/f64-equal :gmir/f64-less-than :gmir/f64-less-or-equal
+              :gmir/f64-greater-than :gmir/f64-greater-or-equal
+              :gmir/f64-unordered]]
+    (let [input (assoc-in program [:gmir/instructions 2 :gmir/op] op)
+          selected (mir/select-target target input)
+          allocated (mir/allocate-registers selected)]
+      (is (= (keyword "mir" (name op))
+             (get-in selected [:mir/instructions 2 :mir/op])))
+      (is (some #(= (keyword "mir" (name op)) (:mir/op %))
+                (:mir/instructions allocated)))))
+  (doseq [target mir/targets]
+    (let [input (assoc program :gmir/instructions
+                       [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                        {:gmir/op :gmir/f64-sqrt :gmir/dst v1 :gmir/input v0}
+                        {:gmir/op :gmir/return :gmir/value v1}])
+          selected (mir/select-target target input)
+          allocated (mir/allocate-registers selected)]
+      (is (= :mir/f64-sqrt
+             (get-in selected [:mir/instructions 1 :mir/op])))
+      (is (some #(= :mir/f64-sqrt (:mir/op %)) (:mir/instructions allocated)))
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))))))
+
+(deftest f64-allocation-spills-binary-and-unary-values
+  (let [registers (mapv gmir/vreg (range 11))
+        program {:gmir/version 1
+                 :gmir/instructions
+                 (vec (concat
+                       (map-indexed (fn [index register]
+                                      {:gmir/op :gmir/constant :gmir/dst register
+                                       :gmir/value (+ 4607182418800017408 index)})
+                                    (subvec registers 0 6))
+                       [{:gmir/op :gmir/f64-add :gmir/dst (registers 6)
+                         :gmir/left (registers 0) :gmir/right (registers 1)}
+                        {:gmir/op :gmir/f64-multiply :gmir/dst (registers 7)
+                         :gmir/left (registers 2) :gmir/right (registers 3)}
+                        {:gmir/op :gmir/f64-unordered :gmir/dst (registers 8)
+                         :gmir/left (registers 4) :gmir/right (registers 5)}
+                        {:gmir/op :gmir/f64-add :gmir/dst (registers 9)
+                         :gmir/left (registers 6) :gmir/right (registers 7)}
+                        {:gmir/op :gmir/f64-sqrt :gmir/dst (registers 10)
+                         :gmir/input (registers 9)}
+                        {:gmir/op :gmir/return :gmir/value (registers 10)}]))}
+        allocated (->> program (mir/select-target :x86-64)
+                       mir/allocate-registers)]
+    (is (= 11 (:mir/frame-slots allocated)))
+    (is (some #(= :mir/f64-sqrt (:mir/op %)) (:mir/instructions allocated)))
+    (is (some #(= :mir/f64-unordered (:mir/op %)) (:mir/instructions allocated)))
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
+
 (deftest allocation-spills-deterministically-when-the-scratch-profile-is-exhausted
   (let [registers (mapv gmir/vreg (range 11))
         program {:gmir/version 1

@@ -35,6 +35,19 @@
    :mir/shift-left #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/shift-right-signed #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/shift-right-unsigned #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-add #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-subtract #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-multiply #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-divide #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-min #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-max #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-sqrt #{:mir/op :mir/dst :mir/input}
+   :mir/f64-equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-less-than #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-less-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-greater-than #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f64-unordered #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/equal #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/less-than #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/greater-than #{:mir/op :mir/dst :mir/left :mir/right}
@@ -100,8 +113,8 @@
                    (contains? #{:mir/spill-load :mir/spill-store :mir/move} op))
           (reject! :physical-operation-in-virtual-program instruction))
         (doseq [register (concat
-                          (keep instruction [:mir/dst :mir/src :mir/left
-                                             :mir/right :mir/test])
+                          (keep instruction [:mir/dst :mir/src :mir/input
+                                             :mir/left :mir/right :mir/test])
                           (when (vector? (:mir/arguments instruction))
                             (:mir/arguments instruction)))]
           (when-not (register? register)
@@ -242,7 +255,13 @@
           (let [value-ops #{:mir/argument :mir/constant :mir/add :mir/subtract
                             :mir/multiply :mir/quotient :mir/bit-and :mir/bit-or
                             :mir/bit-xor :mir/shift-left :mir/shift-right-signed
-                            :mir/shift-right-unsigned :mir/equal :mir/less-than
+                            :mir/shift-right-unsigned
+                            :mir/f64-add :mir/f64-subtract :mir/f64-multiply
+                            :mir/f64-divide :mir/f64-min :mir/f64-max
+                            :mir/f64-sqrt :mir/f64-equal :mir/f64-less-than
+                            :mir/f64-less-or-equal :mir/f64-greater-than
+                            :mir/f64-greater-or-equal :mir/f64-unordered
+                            :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
                             :mir/greater-or-equal :mir/call}]
             (doseq [[index instruction] (map-indexed vector instructions)
@@ -289,6 +308,7 @@
               :gmir/dst :mir/dst
               :gmir/index :mir/index
               :gmir/value :mir/value
+              :gmir/input :mir/input
               :gmir/left :mir/left
               :gmir/right :mir/right
               :gmir/id :mir/id
@@ -331,7 +351,8 @@
                               (:gmir/instructions program))})))
 
 (defn- sources [instruction]
-  (concat (keep instruction [:mir/src :mir/left :mir/right :mir/test :mir/value])
+  (concat (keep instruction [:mir/src :mir/input :mir/left :mir/right
+                             :mir/test :mir/value])
           (when (vector? (:mir/arguments instruction))
             (:mir/arguments instruction))))
 
@@ -797,7 +818,7 @@
         :mir/instructions
         (vec
          (mapcat
-          (fn [{:mir/keys [op dst left right test value callee arguments]
+          (fn [{:mir/keys [op dst input left right test value callee arguments]
                 :as instruction}]
             (case op
               :mir/argument
@@ -822,11 +843,21 @@
               (:mir/add :mir/subtract :mir/multiply :mir/quotient
                :mir/bit-and :mir/bit-or :mir/bit-xor
                :mir/shift-left :mir/shift-right-signed :mir/shift-right-unsigned
+               :mir/f64-add :mir/f64-subtract :mir/f64-multiply
+               :mir/f64-divide :mir/f64-min :mir/f64-max
+               :mir/f64-equal :mir/f64-less-than :mir/f64-less-or-equal
+               :mir/f64-greater-than :mir/f64-greater-or-equal
+               :mir/f64-unordered
                :mir/equal :mir/less-than :mir/greater-than
                :mir/less-or-equal :mir/greater-or-equal)
               [(load-value instruction left r0)
                (load-value instruction right r1)
                {:mir/op op :mir/dst r0 :mir/left r0 :mir/right r1}
+               (store-value instruction dst r0)]
+
+              :mir/f64-sqrt
+              [(load-value instruction input r0)
+               {:mir/op op :mir/dst r0 :mir/input r0}
                (store-value instruction dst r0)]
 
               :mir/branch-zero
