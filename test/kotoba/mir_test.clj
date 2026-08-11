@@ -50,6 +50,30 @@
       (is (= (keyword "mir" (name op))
              (get-in allocated [:mir/instructions 2 :mir/op]))))))
 
+(deftest v3-selection-marks-constant-divisors-without-weakening-ssa-liveness
+  (let [module {:gmir/version 3 :gmir/entry 'kernel
+                :gmir/functions
+                [{:gmir/name 'kernel :gmir/arity 1
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                   {:gmir/op :gmir/constant :gmir/dst v1
+                    :gmir/value 2147483647}
+                   {:gmir/op :gmir/quotient :gmir/dst v2
+                    :gmir/left v0 :gmir/right v1}
+                   {:gmir/op :gmir/return :gmir/value v2}]}]}
+        selected (mir/select-target :aarch64 module)
+        quotient (get-in selected [:mir/functions 0 :mir/instructions 2])
+        allocated (mir/allocate-registers selected)
+        physical (first (filter #(= :mir/quotient-constant (:mir/op %))
+                                (get-in allocated [:mir/functions 0
+                                                   :mir/instructions])))]
+    (is (= :mir/quotient-constant (:mir/op quotient)))
+    (is (= 2147483647 (:mir/divisor quotient)))
+    (is (= v1 (:mir/right quotient))
+        "the constant definition remains an explicit conservative SSA source")
+    (is (= 2147483647 (:mir/divisor physical)))
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
+
 (deftest selection-and-allocation-cover-the-f64-family
   (doseq [target mir/targets
           op [:gmir/f64-add :gmir/f64-subtract :gmir/f64-multiply

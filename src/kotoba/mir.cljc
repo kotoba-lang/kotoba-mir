@@ -58,6 +58,8 @@
    :mir/subtract #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/multiply #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/quotient #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/quotient-constant #{:mir/op :mir/dst :mir/left :mir/right
+                            :mir/divisor}
    :mir/bit-and #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/bit-or #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/bit-xor #{:mir/op :mir/dst :mir/left :mir/right}
@@ -109,10 +111,12 @@
    :mir/return #{:mir/op :mir/value}})
 
 (def ^:private v1-operations
-  (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call))
+  (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call
+        :mir/quotient-constant))
 
 (def ^:private v2-operations
-  (disj (set (keys instruction-keysets)) :mir/call :mir/tail-call))
+  (disj (set (keys instruction-keysets)) :mir/call :mir/tail-call
+        :mir/quotient-constant))
 
 (def ^:private v3-operations
   (set (keys instruction-keysets)))
@@ -261,6 +265,9 @@
         (when (and (= op :mir/constant)
                    (not (gmir/i64-value? (:mir/value instruction))))
           (reject! :constant-not-i64 instruction))
+        (when (and (= op :mir/quotient-constant)
+                   (not (gmir/i64-value? (:mir/divisor instruction))))
+          (reject! :constant-divisor-not-i64 instruction))
         (when (and (= op :mir/data-address)
                    (not (string? (:mir/content instruction))))
           (reject! :invalid-data-content instruction))
@@ -377,7 +384,8 @@
           (reject! :call-frame-policy-violation function))
         (when (and (= :physical registers) (= :all-vregs frame-policy))
           (let [value-ops #{:mir/argument :mir/constant :mir/add :mir/subtract
-                            :mir/multiply :mir/quotient :mir/bit-and :mir/bit-or
+                            :mir/multiply :mir/quotient :mir/quotient-constant
+                            :mir/bit-and :mir/bit-or
                             :mir/bit-xor :mir/shift-left :mir/shift-right-signed
                             :mir/shift-right-unsigned
                             :mir/f64-add :mir/f64-subtract :mir/f64-multiply
@@ -475,6 +483,32 @@
      {})
    instruction))
 
+(defn- select-instructions
+  "Select one function while retaining SSA constants long enough to choose a
+  target-independent constant-divisor operation. The original right vreg is
+  retained in MIR so existing allocation/liveness rules remain conservative;
+  MC encoding may replace the hardware divide with a proven reciprocal
+  sequence."
+  [target instructions constant-division?]
+  (:out
+   (reduce
+    (fn [{:keys [constants out]} instruction]
+      (let [selected (select-instruction target instruction)
+            selected (if (and constant-division?
+                              (= :gmir/quotient (:gmir/op instruction))
+                              (contains? constants (:gmir/right instruction)))
+                       (assoc selected
+                              :mir/op :mir/quotient-constant
+                              :mir/divisor (get constants (:gmir/right instruction)))
+                       selected)
+            constants (if (= :gmir/constant (:gmir/op instruction))
+                        (assoc constants (:gmir/dst instruction)
+                               (:gmir/value instruction))
+                        constants)]
+        {:constants constants :out (conj out selected)}))
+    {:constants {} :out []}
+    instructions)))
+
 (defn select-target
   "Select the closed GMIR operation set into target MIR, preserving vregs."
   [target program]
@@ -497,7 +531,7 @@
       :mir/functions
       (mapv (fn [{:gmir/keys [name arity instructions]}]
               {:mir/name name :mir/arity arity
-               :mir/instructions (mapv #(select-instruction target %) instructions)})
+               :mir/instructions (select-instructions target instructions true)})
             (:gmir/functions program))}
      {:mir/version (:gmir/version program)
       :mir/target target
@@ -1076,6 +1110,7 @@
               []
 
               (:mir/add :mir/subtract :mir/multiply :mir/quotient
+               :mir/quotient-constant
                :mir/bit-and :mir/bit-or :mir/bit-xor
                :mir/shift-left :mir/shift-right-signed :mir/shift-right-unsigned
                :mir/f64-add :mir/f64-subtract :mir/f64-multiply
