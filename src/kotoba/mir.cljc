@@ -523,7 +523,13 @@
               :out (conj out selected)}))
          {:constants {} :specialized-divisors #{} :out []}
          instructions)
-        live-sources (set (mapcat instruction-sources out))]
+        ;; NBB represents admitted i64 literals as JavaScript BigInt values.
+        ;; They are not SSA identities and must not enter a CLJS hash-set
+        ;; (which would attempt object identity bookkeeping on a primitive).
+        live-sources (->> out
+                          (mapcat instruction-sources)
+                          (filter gmir/vreg?)
+                          set)]
     (->> out
          (remove (fn [{:mir/keys [op dst]}]
                    (and (= :mir/constant op)
