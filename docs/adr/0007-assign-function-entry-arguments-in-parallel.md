@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. The five-live-argument fallback below is superseded by ADR 0008;
+the marker and parallel-copy decisions remain current.
 
 ## Context
 

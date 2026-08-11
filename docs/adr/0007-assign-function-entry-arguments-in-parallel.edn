@@ -1,5 +1,6 @@
 {:adr/id 7
  :adr/status :accepted
+ :adr/superseded-scope {:by 8 :scope :five-live-argument-fallback}
  :decision :parallel-function-entry-assignment
  :contract {:mir/version 3
             :targets #{:x86-64 :aarch64}

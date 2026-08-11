@@ -402,7 +402,7 @@
                             (mir/select-target target)
                             mir/allocate-registers)) target))))
 
-(deftest v3-call-arguments-are-loaded-in-parallel-from-stable-frame-slots
+(deftest v3-fifth-call-argument-is-loaded-directly-from-one-entry-slot
   (let [args (mapv gmir/vreg (range 5))
         result (gmir/vreg 5)
         module {:gmir/version 3
@@ -434,12 +434,20 @@
                                (fn [index instruction]
                                  (when (= :mir/call (:mir/op instruction)) index))
                                instructions))
-            loads (subvec instructions (- call-index 5) call-index)]
-        (is (= :all-vregs (:mir/frame-policy caller)) target)
-        (is (= (get mir/call-argument-registers target)
-               (mapv :mir/dst loads)) target)
-        (is (= (vec (range 5)) (mapv :mir/slot loads)) target)
-        (is (every? #(= :mir/spill-load (:mir/op %)) loads) target)))))
+            stores (filterv #(= :mir/spill-store (:mir/op %)) instructions)
+            loads (filterv #(= :mir/spill-load (:mir/op %)) instructions)
+            fifth-input (nth (get mir/call-argument-registers target) 4)]
+        (is (= :call-live (:mir/frame-policy caller)) target)
+        (is (= 1 (:mir/frame-slots caller)) target)
+        (is (= [{:mir/op :mir/spill-store :mir/src fifth-input :mir/slot 0}]
+               stores) target)
+        (is (= [{:mir/op :mir/spill-load :mir/dst fifth-input :mir/slot 0}]
+               loads) target)
+        (is (= (dec call-index)
+               (first (keep-indexed (fn [index instruction]
+                                      (when (= (first loads) instruction) index))
+                                    instructions)))
+            target)))))
 
 (deftest v3-call-liveness-does-not-materialize-dead-values
   (let [module {:gmir/version 3
@@ -553,6 +561,94 @@
                    :mir/src :x86-64/rsi}]
                  (filterv #(= :mir/move (:mir/op %))
                           (:mir/instructions callee)))))))))
+
+(deftest v3-five-live-entry-arguments-spill-only-the-excess-input
+  (let [arguments (mapv gmir/vreg (range 5))
+        s01 (gmir/vreg 5)
+        s23 (gmir/vreg 6)
+        s014 (gmir/vreg 7)
+        result (gmir/vreg 8)
+        module {:gmir/version 3
+                :gmir/entry 'sum-five
+                :gmir/functions
+                [{:gmir/name 'sum-five :gmir/arity 5
+                  :gmir/instructions
+                  (vec (concat
+                        (map-indexed (fn [index value]
+                                       {:gmir/op :gmir/argument :gmir/dst value
+                                        :gmir/index index})
+                                     arguments)
+                        [{:gmir/op :gmir/add :gmir/dst s01
+                          :gmir/left (arguments 0) :gmir/right (arguments 1)}
+                         {:gmir/op :gmir/add :gmir/dst s23
+                          :gmir/left (arguments 2) :gmir/right (arguments 3)}
+                         {:gmir/op :gmir/add :gmir/dst s014
+                          :gmir/left s01 :gmir/right (arguments 4)}
+                         {:gmir/op :gmir/add :gmir/dst result
+                          :gmir/left s014 :gmir/right s23}
+                         {:gmir/op :gmir/return :gmir/value result}]))}]}]
+    (doseq [target mir/targets]
+      (let [function (first (:mir/functions
+                             (->> module (mir/select-target target)
+                                  mir/allocate-registers)))
+            instructions (:mir/instructions function)
+            fifth-input (nth (get mir/call-argument-registers target) 4)]
+        (is (= :allocator (:mir/frame-policy function)) target)
+        (is (= 1 (:mir/frame-slots function)) target)
+        (is (= [{:mir/op :mir/spill-store :mir/src fifth-input :mir/slot 0}]
+               (filterv #(= :mir/spill-store (:mir/op %)) instructions)) target)
+        (let [loads (filterv #(= :mir/spill-load (:mir/op %)) instructions)]
+          (is (= 1 (count loads)) target)
+          (is (= 0 (:mir/slot (first loads))) target)
+          (is (contains? (set (get mir/physical-registers target))
+                         (:mir/dst (first loads))) target))
+        (is (not-any? gmir/vreg? (tree-seq coll? seq function)) target)))))
+
+(deftest v3-excess-entry-argument-reuses-its-call-live-slot
+  (let [arguments (mapv gmir/vreg (range 5))
+        call-result (gmir/vreg 5)
+        result (gmir/vreg 6)
+        module {:gmir/version 3
+                :gmir/entry 'main
+                :gmir/functions
+                [{:gmir/name 'sum-four :gmir/arity 4
+                  :gmir/instructions
+                  (vec (concat
+                        (map-indexed (fn [index value]
+                                       {:gmir/op :gmir/argument :gmir/dst value
+                                        :gmir/index index})
+                                     (subvec arguments 0 4))
+                        [{:gmir/op :gmir/add :gmir/dst call-result
+                          :gmir/left (arguments 0) :gmir/right (arguments 1)}
+                         {:gmir/op :gmir/add :gmir/dst result
+                          :gmir/left call-result :gmir/right (arguments 2)}
+                         {:gmir/op :gmir/return :gmir/value result}]))}
+                 {:gmir/name 'main :gmir/arity 5
+                  :gmir/instructions
+                  (vec (concat
+                        (map-indexed (fn [index value]
+                                       {:gmir/op :gmir/argument :gmir/dst value
+                                        :gmir/index index})
+                                     arguments)
+                        [{:gmir/op :gmir/call :gmir/dst call-result
+                          :gmir/callee 'sum-four
+                          :gmir/arguments (subvec arguments 0 4)}
+                         {:gmir/op :gmir/add :gmir/dst result
+                          :gmir/left call-result :gmir/right (arguments 4)}
+                         {:gmir/op :gmir/return :gmir/value result}]))}]}]
+    (doseq [target mir/targets]
+      (let [caller (second (:mir/functions
+                            (->> module (mir/select-target target)
+                                 mir/allocate-registers)))
+            instructions (:mir/instructions caller)]
+        (is (= :call-live (:mir/frame-policy caller)) target)
+        (is (= 1 (:mir/frame-slots caller)) target)
+        (is (= [0] (mapv :mir/slot
+                         (filter #(= :mir/spill-store (:mir/op %)) instructions)))
+            target)
+        (is (= [0] (mapv :mir/slot
+                         (filter #(= :mir/spill-load (:mir/op %)) instructions)))
+            target)))))
 
 (deftest v3-physical-call-contract-fails-closed
   (let [allocated (->> scalar-call-module
