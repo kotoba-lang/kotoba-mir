@@ -103,6 +103,36 @@
     (is (some #(= :mir/f64-unordered (:mir/op %)) (:mir/instructions allocated)))
     (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
 
+(deftest selection-and-allocation-cover-bounded-kernel-memory
+  (let [prefix [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                {:gmir/op :gmir/argument :gmir/dst v1 :gmir/index 1}
+                {:gmir/op :gmir/argument :gmir/dst v2 :gmir/index 2}
+                {:gmir/op :gmir/argument :gmir/dst v3 :gmir/index 3}]
+        operations
+        [{:gmir/op :gmir/kernel-load-u8 :gmir/dst v4
+          :gmir/base v0 :gmir/length v1 :gmir/index v2 :gmir/maximum 512}
+         {:gmir/op :gmir/kernel-load-u32 :gmir/dst v4
+          :gmir/base v0 :gmir/length v1 :gmir/index v2 :gmir/maximum 512}
+         {:gmir/op :gmir/kernel-store-u8 :gmir/dst v4
+          :gmir/base v0 :gmir/length v1 :gmir/index v2 :gmir/stored v3
+          :gmir/maximum 4096}
+         {:gmir/op :gmir/kernel-store-u32 :gmir/dst v4
+          :gmir/base v0 :gmir/length v1 :gmir/index v2 :gmir/stored v3
+          :gmir/maximum 512}
+         {:gmir/op :gmir/kernel-subregion :gmir/dst v4
+          :gmir/base v0 :gmir/length v1 :gmir/offset v2 :gmir/size v3}]]
+    (doseq [target mir/targets, operation operations]
+      (let [program {:gmir/version 1
+                     :gmir/instructions
+                     (conj prefix operation
+                           {:gmir/op :gmir/return :gmir/value v4})}
+            selected (mir/select-target target program)
+            allocated (mir/allocate-registers selected)
+            mir-op (keyword "mir" (name (:gmir/op operation)))]
+        (is (= mir-op (get-in selected [:mir/instructions 4 :mir/op])))
+        (is (some #(= mir-op (:mir/op %)) (:mir/instructions allocated)))
+        (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))))
+
 (deftest allocation-spills-deterministically-when-the-scratch-profile-is-exhausted
   (let [registers (mapv gmir/vreg (range 11))
         program {:gmir/version 1

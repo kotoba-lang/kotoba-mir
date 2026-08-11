@@ -48,6 +48,16 @@
    :mir/f64-greater-than #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/f64-greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/f64-unordered #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/kernel-load-u8 #{:mir/op :mir/dst :mir/base :mir/length
+                         :mir/index :mir/maximum}
+   :mir/kernel-store-u8 #{:mir/op :mir/dst :mir/base :mir/length
+                          :mir/index :mir/stored :mir/maximum}
+   :mir/kernel-load-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                          :mir/index :mir/maximum}
+   :mir/kernel-store-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                           :mir/index :mir/stored :mir/maximum}
+   :mir/kernel-subregion #{:mir/op :mir/dst :mir/base :mir/length
+                           :mir/offset :mir/size}
    :mir/equal #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/less-than #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/greater-than #{:mir/op :mir/dst :mir/left :mir/right}
@@ -114,11 +124,25 @@
           (reject! :physical-operation-in-virtual-program instruction))
         (doseq [register (concat
                           (keep instruction [:mir/dst :mir/src :mir/input
-                                             :mir/left :mir/right :mir/test])
+                                             :mir/left :mir/right :mir/test
+                                             :mir/base :mir/length
+                                             :mir/stored :mir/offset :mir/size])
                           (when (vector? (:mir/arguments instruction))
                             (:mir/arguments instruction)))]
           (when-not (register? register)
             (reject! :register-profile-violation instruction)))
+        (when (and (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
+                                :mir/kernel-load-u32 :mir/kernel-store-u32} op)
+                   (not (register? (:mir/index instruction))))
+          (reject! :register-profile-violation instruction))
+        (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8} op)
+          (when-not (and (contains? #{512 4096 16384} (:mir/maximum instruction))
+                         (not (and (= :mir/kernel-store-u8 op)
+                                   (= 16384 (:mir/maximum instruction)))))
+            (reject! :invalid-kernel-memory-maximum instruction)))
+        (when (contains? #{:mir/kernel-load-u32 :mir/kernel-store-u32} op)
+          (when-not (= 512 (:mir/maximum instruction))
+            (reject! :invalid-kernel-memory-maximum instruction)))
         (when (and (= op :mir/return) (not (register? (:mir/value instruction))))
           (reject! :register-profile-violation instruction))
         (when (= op :mir/phi)
@@ -261,6 +285,9 @@
                             :mir/f64-sqrt :mir/f64-equal :mir/f64-less-than
                             :mir/f64-less-or-equal :mir/f64-greater-than
                             :mir/f64-greater-or-equal :mir/f64-unordered
+                            :mir/kernel-load-u8 :mir/kernel-store-u8
+                            :mir/kernel-load-u32 :mir/kernel-store-u32
+                            :mir/kernel-subregion
                             :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
                             :mir/greater-or-equal :mir/call}]
@@ -316,7 +343,13 @@
               :gmir/target :mir/target
               :gmir/incomings :mir/incomings
               :gmir/callee :mir/callee
-              :gmir/arguments :mir/arguments)
+              :gmir/arguments :mir/arguments
+              :gmir/base :mir/base
+              :gmir/length :mir/length
+              :gmir/stored :mir/stored
+              :gmir/offset :mir/offset
+              :gmir/size :mir/size
+              :gmir/maximum :mir/maximum)
             (cond
               (= key :gmir/op) (keyword "mir" (name value))
               (= key :gmir/incomings)
@@ -352,7 +385,12 @@
 
 (defn- sources [instruction]
   (concat (keep instruction [:mir/src :mir/input :mir/left :mir/right
-                             :mir/test :mir/value])
+                             :mir/test :mir/value :mir/base :mir/length
+                             :mir/stored :mir/offset :mir/size])
+          (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
+                             :mir/kernel-load-u32 :mir/kernel-store-u32}
+                           (:mir/op instruction))
+            [(:mir/index instruction)])
           (when (vector? (:mir/arguments instruction))
             (:mir/arguments instruction))))
 
@@ -851,7 +889,7 @@
   [{:mir/keys [version target instructions] :as program} merge-dst-by-slot]
   (let [slots (spill-slots instructions 0)
         slot-count (count slots)
-        [r0 r1] (get physical-registers target)
+        [r0 r1 r2 r3] (get physical-registers target)
         argument-registers (get call-argument-registers target)]
     (when (> slot-count 4095)
       (reject! :spill-frame-too-large {:frame-slots slot-count}))
@@ -872,7 +910,8 @@
         :mir/instructions
         (vec
          (mapcat
-          (fn [{:mir/keys [op dst input left right test value callee arguments]
+          (fn [{:mir/keys [op dst input left right test value callee arguments
+                           base length index stored offset size maximum]
                 :as instruction}]
             (case op
               :mir/argument
@@ -912,6 +951,32 @@
               :mir/f64-sqrt
               [(load-value instruction input r0)
                {:mir/op op :mir/dst r0 :mir/input r0}
+               (store-value instruction dst r0)]
+
+              (:mir/kernel-load-u8 :mir/kernel-load-u32)
+              [(load-value instruction base r0)
+               (load-value instruction length r1)
+               (load-value instruction index r2)
+               {:mir/op op :mir/dst r0 :mir/base r0 :mir/length r1
+                :mir/index r2 :mir/maximum maximum}
+               (store-value instruction dst r0)]
+
+              (:mir/kernel-store-u8 :mir/kernel-store-u32)
+              [(load-value instruction base r0)
+               (load-value instruction length r1)
+               (load-value instruction index r2)
+               (load-value instruction stored r3)
+               {:mir/op op :mir/dst r3 :mir/base r0 :mir/length r1
+                :mir/index r2 :mir/stored r3 :mir/maximum maximum}
+               (store-value instruction dst r3)]
+
+              :mir/kernel-subregion
+              [(load-value instruction base r0)
+               (load-value instruction length r1)
+               (load-value instruction offset r2)
+               (load-value instruction size r3)
+               {:mir/op op :mir/dst r0 :mir/base r0 :mir/length r1
+                :mir/offset r2 :mir/size r3}
                (store-value instruction dst r0)]
 
               :mir/branch-zero
