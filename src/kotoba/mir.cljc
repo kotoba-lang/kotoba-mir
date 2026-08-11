@@ -221,6 +221,15 @@
          (cond-> {:mir/version 3 :mir/target target :mir/registers registers
                   :mir/instructions instructions}
            (= :physical registers) (assoc :mir/frame-slots frame-slots)))
+        (when (= :physical registers)
+          (let [arguments (filterv #(= :mir/argument (:mir/op %)) instructions)
+                expected-registers (subvec (get call-argument-registers target)
+                                           0 arity)]
+            (when-not (and (= arity (count arguments))
+                           (= (vec (range arity)) (mapv :mir/index arguments))
+                           (= expected-registers (mapv :mir/dst arguments)))
+              (reject! :entry-argument-profile-violation
+                       {:function name :arguments arguments}))))
         (when (and (= :physical registers)
                    (if (seq calls)
                      (not (contains? #{:all-vregs :call-live} frame-policy))
@@ -487,6 +496,61 @@
      (reduce #(assoc %1 %2 index) uses (filter gmir/vreg? (sources instruction))))
    {} instructions))
 
+(defn- ordered-vregs [values]
+  (sort-by (fn [value] (or (:gmir/id value) (str value))) values))
+
+(defn- expire-assigned
+  "Remove VALUES from STATE's assignment without returning a register that is
+  still owned by another SSA value (the latter occurs after a dying-left
+  destination coalesces onto its source register)."
+  [state values]
+  (let [expired (vec (ordered-vregs values))
+        assigned (:assigned state)
+        remaining (apply dissoc assigned expired)
+        still-owned (set (vals remaining))
+        freed (remove still-owned (map assigned expired))]
+    (-> state
+        (assoc :assigned remaining)
+        (update :free into freed))))
+
+(defn- entry-argument-plan
+  "Materialize a function's ABI inputs as canonical self-markers followed by a
+  parallel copy into allocator registers. Unused inputs need only their marker.
+  Non-prefix arguments or more simultaneously used inputs than the allocator
+  profile fail into the existing all-vreg path."
+  [target instructions last-use temp-slot]
+  (let [[arguments remaining] (split-with #(= :mir/argument (:mir/op %))
+                                          instructions)]
+    (when (some #(= :mir/argument (:mir/op %)) remaining)
+      (reject! :spill-required {:problem :non-prefix-argument}))
+    (let [arguments (vec arguments)
+          remaining (vec remaining)
+          allocator-registers (get physical-registers target)
+          abi-registers (get call-argument-registers target)
+          used (filterv #(contains? last-use (:mir/dst %)) arguments)]
+      (when (> (count used) (count allocator-registers))
+        (reject! :spill-required {:problem :entry-register-pressure}))
+      (let [assigned (into {}
+                           (map (fn [instruction register]
+                                  [(:mir/dst instruction) register])
+                                used allocator-registers))
+            input-register (fn [instruction]
+                             (or (get abi-registers (:mir/index instruction))
+                                 (reject! :spill-required instruction)))
+            markers (mapv #(assoc % :mir/dst (input-register %)) arguments)
+            copies (mapv (fn [instruction]
+                           {:mir/dst (get assigned (:mir/dst instruction))
+                            :mir/src (input-register instruction)})
+                         used)
+            scheduled (schedule-parallel-copies copies temp-slot)
+            owned (set (vals assigned))]
+        {:argument-count (count arguments)
+         :remaining remaining
+         :assigned assigned
+         :free (vec (remove owned allocator-registers))
+         :instructions (into markers (:instructions scheduled))
+         :used-temp? (:used-temp? scheduled)}))))
+
 (defn- call-live-slots
   "Assign stable slots only to SSA values whose definition precedes a call and
   whose final use follows that call. Slots are ordered by definition, so the
@@ -532,15 +596,13 @@
         temp-slot (count slots)]
     (when (> (+ (count slots) 1) 4095)
       (reject! :spill-frame-too-large {:frame-slots (count slots)}))
-    (letfn [(ordered-values [values]
-              (sort-by (fn [value] (or (:gmir/id value) (str value))) values))
-            (expire [state index]
-              (let [expired (filter #(= index (get last-use %))
-                                    (keys (:assigned state)))]
-                (-> state
-                    (update :free into (map (:assigned state)
-                                            (ordered-values expired)))
-                    (update :assigned #(apply dissoc % expired)))))
+    (let [entry (entry-argument-plan target instructions last-use temp-slot)]
+      (letfn [(expire [state index just-defined]
+                (let [expired (filter #(or (= index (get last-use %))
+                                           (and (= just-defined %)
+                                                (not (contains? last-use %))))
+                                      (keys (:assigned state)))]
+                  (expire-assigned state expired)))
             (ensure-source [state instruction value]
               (if (contains? (:assigned state) value)
                 state
@@ -567,13 +629,13 @@
                       (assoc-in [:assigned dst] register)
                       (update :free #(vec (rest %)))))))]
       (let [result
-            (reduce-kv
-             (fn [state index {:mir/keys [op dst arguments] :as instruction}]
+            (reduce
+             (fn [state [index {:mir/keys [op dst arguments] :as instruction}]]
                (if (= :mir/call op)
                  (let [state (ensure-sources state instruction arguments)
                        live-values (->> (keys (:assigned state))
                                         (filter #(> (get last-use % -1) index))
-                                        ordered-values)
+                                        ordered-vregs)
                        to-store (filter #(and (contains? slots %)
                                               (not (contains? (:materialized state) %)))
                                         live-values)
@@ -601,7 +663,7 @@
                                                     {dst return-register} {}))
                                  (assoc :free (vec (remove #{return-register}
                                                           allocator-registers))))]
-                   (expire state index))
+                   (expire state index dst))
                  (let [source-values (filter gmir/vreg? (sources instruction))
                        state (ensure-sources state instruction source-values)
                        state (allocate-dst state instruction dst)
@@ -613,25 +675,29 @@
                                              value)))
                                   {} instruction)
                        state (update state :out conj allocated)]
-                   (expire state index))))
-             {:assigned {} :free allocator-registers :materialized #{}
-              :used-temp? false :out []}
-             instructions)
+                   (expire state index dst))))
+             {:assigned (:assigned entry) :free (:free entry) :materialized #{}
+              :used-temp? (:used-temp? entry) :out (:instructions entry)}
+             (map-indexed (fn [offset instruction]
+                            [(+ (:argument-count entry) offset) instruction])
+                          (:remaining entry)))
             frame-slots (+ (count slots) (if (:used-temp? result) 1 0))]
         (validate-flat!
          {:mir/version version
           :mir/target target
           :mir/registers :physical
           :mir/frame-slots frame-slots
-          :mir/instructions (:out result)})))))
+          :mir/instructions (:out result)}))))))
 
 (defn- allocate-without-spills
   [{:mir/keys [version target registers instructions] :as program} merge-slots]
   (when-not (= :virtual registers)
     (reject! :registers-not-virtual program))
   (let [last-use (last-uses instructions)
-        available (get physical-registers target)]
-    (loop [index 0, remaining instructions, assigned {}, free available, out []]
+        entry (entry-argument-plan target instructions last-use merge-slots)]
+    (loop [index (:argument-count entry), remaining (:remaining entry)
+           assigned (:assigned entry), free (:free entry)
+           out (:instructions entry), used-temp? (:used-temp? entry)]
       (if-let [instruction (first remaining)]
         (let [srcs (filter gmir/vreg? (sources instruction))]
           (doseq [source srcs]
@@ -643,9 +709,15 @@
                   (do
                     (when (contains? assigned dst)
                       (reject! :multiple-definition instruction))
-                    (when-not (seq free)
-                      (reject! :spill-required instruction))
-                    [(assoc assigned dst (first free)) (vec (rest free))])
+                    (let [dying-left (when (and (gmir/vreg? (:mir/left instruction))
+                                                (= index (get last-use
+                                                              (:mir/left instruction))))
+                                       (get assigned (:mir/left instruction)))
+                          register (or (first free) dying-left)]
+                      (when-not register
+                        (reject! :spill-required instruction))
+                      [(assoc assigned dst register)
+                       (if (seq free) (vec (rest free)) free)]))
                   [assigned free])
                 allocated (reduce-kv
                            (fn [result key value]
@@ -664,18 +736,19 @@
                              :mir/dst (:mir/dst allocated)
                              :mir/slot (:mir/slot allocated)}
                             allocated)
-                expired (->> (keys assigned)
-                             (filter #(= index (get last-use %)))
-                             (sort-by str))
-                free (into free (map assigned expired))
-                assigned (apply dissoc assigned expired)]
-            (recur (inc index) (next remaining) assigned (vec free)
-                   (conj out allocated))))
+                expired (filter #(or (= index (get last-use %))
+                                     (and (= dst %)
+                                          (not (contains? last-use %))))
+                                (keys assigned))
+                state (expire-assigned {:assigned assigned :free free} expired)]
+            (recur (inc index) (next remaining)
+                   (:assigned state) (vec (:free state))
+                   (conj out allocated) used-temp?)))
         (validate-flat!
          {:mir/version version
           :mir/target target
           :mir/registers :physical
-          :mir/frame-slots merge-slots
+          :mir/frame-slots (+ merge-slots (if used-temp? 1 0))
           :mir/instructions out})))))
 
 (defn- spill-slots [instructions offset]
@@ -723,7 +796,13 @@
           (fn [{:mir/keys [op dst left right test value callee arguments]
                 :as instruction}]
             (case op
-              (:mir/argument :mir/constant)
+              :mir/argument
+              (let [register (or (get argument-registers (:mir/index instruction))
+                                 (reject! :argument-index-invalid instruction))]
+                [(assoc instruction :mir/dst register)
+                 (store-value instruction dst register)])
+
+              :mir/constant
               [(assoc instruction :mir/dst r0)
                (store-value instruction dst r0)]
 
