@@ -452,7 +452,25 @@
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target)
       (is (= allocated (->> scalar-call-module
                             (mir/select-target target)
-                            mir/allocate-registers)) target))))
+                             mir/allocate-registers)) target))))
+
+(deftest v3-tail-calls-release-the-current-frame-before-transfer
+  (let [module (assoc-in scalar-call-module
+                         [:gmir/functions 1 :gmir/instructions]
+                         [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                          {:gmir/op :gmir/tail-call :gmir/callee 'add-one
+                           :gmir/arguments [v0]}])]
+    (doseq [target mir/targets]
+      (let [caller (second (:mir/functions
+                            (->> module
+                                 (mir/select-target target)
+                                 mir/allocate-registers)))
+            tail (peek (:mir/instructions caller))]
+        (is (= :call-live (:mir/frame-policy caller)) target)
+        (is (= :mir/tail-call (:mir/op tail)) target)
+        (is (= 'add-one (:mir/callee tail)) target)
+        (is (= [(first (get mir/call-argument-registers target))]
+               (:mir/arguments tail)) target)))))
 
 (deftest v3-fifth-call-argument-is-loaded-directly-from-one-entry-slot
   (let [args (mapv gmir/vreg (range 5))

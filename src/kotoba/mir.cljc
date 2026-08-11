@@ -100,6 +100,7 @@
    :mir/jump #{:mir/op :mir/target}
    :mir/phi #{:mir/op :mir/dst :mir/incomings}
    :mir/call #{:mir/op :mir/dst :mir/callee :mir/arguments}
+   :mir/tail-call #{:mir/op :mir/callee :mir/arguments}
    :mir/runtime-call #{:mir/op :mir/dst :mir/runtime :mir/context-offset
                        :mir/arguments}
    :mir/x86-privileged #{:mir/op :mir/dst :mir/action :mir/arguments}
@@ -108,10 +109,10 @@
    :mir/return #{:mir/op :mir/value}})
 
 (def ^:private v1-operations
-  (disj (set (keys instruction-keysets)) :mir/phi :mir/call))
+  (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call))
 
 (def ^:private v2-operations
-  (disj (set (keys instruction-keysets)) :mir/call))
+  (disj (set (keys instruction-keysets)) :mir/call :mir/tail-call))
 
 (def ^:private v3-operations
   (set (keys instruction-keysets)))
@@ -129,7 +130,8 @@
              value))
 
 (defn- call-operation? [op]
-  (contains? #{:mir/call :mir/runtime-call :mir/capability-call} op))
+  (contains? #{:mir/call :mir/tail-call :mir/runtime-call
+               :mir/capability-call} op))
 
 (defn- argument-registers-for-call [target {:mir/keys [op kind]}]
   (case op
@@ -200,15 +202,16 @@
                                         (register? (:mir/value incoming))))
                                  (:mir/incomings instruction)))
             (reject! :invalid-phi-incomings instruction)))
-        (when (= op :mir/call)
+        (when (contains? #{:mir/call :mir/tail-call} op)
           (when-not (and (= 3 version)
                          (gmir/function-id? (:mir/callee instruction))
                          (vector? (:mir/arguments instruction))
                          (<= (count (:mir/arguments instruction)) 5))
             (reject! :invalid-call instruction))
           (when (= :physical registers)
-            (when-not (and (= (:mir/dst instruction)
-                              (get return-registers target))
+            (when-not (and (or (= op :mir/tail-call)
+                               (= (:mir/dst instruction)
+                                  (get return-registers target)))
                            (= (:mir/arguments instruction)
                               (subvec (get call-argument-registers target)
                                       0 (count (:mir/arguments instruction)))))
@@ -345,7 +348,8 @@
                             #{:mir/name :mir/arity :mir/frame-slots
                               :mir/frame-policy :mir/instructions})
             calls (filter #(call-operation? (:mir/op %)) instructions)
-            direct-calls (filter #(= :mir/call (:mir/op %)) instructions)]
+            direct-calls (filter #(contains? #{:mir/call :mir/tail-call}
+                                              (:mir/op %)) instructions)]
         (when-not (and (= expected-keys (set (keys function)))
                        (gmir/function-id? name)
                        (integer? arity) (<= 0 arity 5)
@@ -866,9 +870,10 @@
                                              :mir/dst register
                                              :mir/slot (get slots value)})))
                                   vec)
-                       call (cond-> {:mir/op op :mir/dst return-register
-                                     :mir/arguments call-registers}
-                              (= :mir/call op)
+                       call (cond-> {:mir/op op :mir/arguments call-registers}
+                              (not= :mir/tail-call op)
+                              (assoc :mir/dst return-register)
+                              (contains? #{:mir/call :mir/tail-call} op)
                               (assoc :mir/callee (:mir/callee instruction))
                               (= :mir/runtime-call op)
                               (assoc :mir/runtime (:mir/runtime instruction)
@@ -1129,6 +1134,16 @@
               :mir/branch-zero
               [(load-value instruction test r0)
                (assoc instruction :mir/test r0)]
+
+              :mir/tail-call
+              (let [call-registers (subvec (get call-argument-registers target)
+                                           0 (count arguments))]
+                (concat
+                 (mapv (fn [argument register]
+                         (load-value instruction argument register))
+                       arguments call-registers)
+                 [{:mir/op :mir/tail-call :mir/callee callee
+                   :mir/arguments call-registers}]))
 
               (:mir/call :mir/runtime-call :mir/capability-call)
               (let [call-registers (subvec (argument-registers-for-call target instruction)
