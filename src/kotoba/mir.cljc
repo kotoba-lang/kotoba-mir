@@ -27,6 +27,19 @@
    :vector-new-empty 152 :vector-conj 160 :vector-count 168
    :vector-at 176 :vector-assoc 184 :vector-drop 192})
 
+(def capability-argument-registers
+  {:x86-64 {:i64 [:x86-64/rdx]
+            :string [:x86-64/r8]
+            :option-i64 [:x86-64/r8]
+            :result-i64 [:x86-64/r8]}
+   :aarch64 {:i64 [:aarch64/x2]
+             :string [:aarch64/x4]
+             :option-i64 [:aarch64/x4]
+             :result-i64 [:aarch64/x4]}})
+
+(def capability-context-offsets
+  {:i64 48 :string 128 :option-i64 128 :result-i64 128})
+
 (def return-registers
   {:x86-64 :x86-64/rax
    :aarch64 :aarch64/x0})
@@ -86,6 +99,8 @@
    :mir/call #{:mir/op :mir/dst :mir/callee :mir/arguments}
    :mir/runtime-call #{:mir/op :mir/dst :mir/runtime :mir/context-offset
                        :mir/arguments}
+   :mir/capability-call #{:mir/op :mir/dst :mir/capability :mir/kind
+                          :mir/context-offset :mir/arguments}
    :mir/return #{:mir/op :mir/value}})
 
 (def ^:private v1-operations
@@ -110,13 +125,13 @@
              value))
 
 (defn- call-operation? [op]
-  (contains? #{:mir/call :mir/runtime-call} op))
+  (contains? #{:mir/call :mir/runtime-call :mir/capability-call} op))
 
-(defn- argument-registers-for-call [target op]
-  (get (if (= :mir/runtime-call op)
-         runtime-argument-registers
-         call-argument-registers)
-       target))
+(defn- argument-registers-for-call [target {:mir/keys [op kind]}]
+  (case op
+    :mir/runtime-call (get runtime-argument-registers target)
+    :mir/capability-call (get-in capability-argument-registers [target kind])
+    (get call-argument-registers target)))
 
 (defn- validate-flat!
   [{:mir/keys [version target registers instructions frame-slots] :as program}]
@@ -210,6 +225,24 @@
                                 (subvec (get runtime-argument-registers target)
                                         0 (count arguments))))
                 (reject! :physical-runtime-call-profile-violation instruction)))))
+        (when (= op :mir/capability-call)
+          (let [kind (:mir/kind instruction)
+                capability (:mir/capability instruction)
+                arguments (:mir/arguments instruction)]
+            (when-not (and (contains? gmir/capability-kinds kind)
+                           (integer? capability) (<= 0 capability 255)
+                           (= 1 (count arguments))
+                           (= (get capability-context-offsets kind)
+                              (:mir/context-offset instruction)))
+              (reject! :invalid-capability-call instruction))
+            (when (= :physical registers)
+              (when-not (and (= (:mir/dst instruction)
+                                (get return-registers target))
+                             (= arguments
+                                (get-in capability-argument-registers
+                                        [target kind])))
+                (reject! :physical-capability-call-profile-violation
+                         instruction)))))
         (when (and (= op :mir/constant)
                    (not (gmir/i64-value? (:mir/value instruction))))
           (reject! :constant-not-i64 instruction))
@@ -331,7 +364,8 @@
                             :mir/kernel-subregion
                             :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
-                            :mir/greater-or-equal :mir/call :mir/runtime-call}]
+                            :mir/greater-or-equal :mir/call :mir/runtime-call
+                            :mir/capability-call}]
             (doseq [[index instruction] (map-indexed vector instructions)
                     :when (contains? value-ops (:mir/op instruction))]
               (let [store (get instructions (inc index))]
@@ -385,6 +419,8 @@
               :gmir/incomings :mir/incomings
               :gmir/callee :mir/callee
               :gmir/runtime :mir/runtime
+              :gmir/capability :mir/capability
+              :gmir/kind :mir/kind
               :gmir/arguments :mir/arguments
               :gmir/base :mir/base
               :gmir/length :mir/length
@@ -400,9 +436,13 @@
                        :mir/value (:gmir/value incoming)})
                     value)
               :else value)))
-   (if (= :gmir/runtime-call (:gmir/op instruction))
+   (case (:gmir/op instruction)
+     :gmir/runtime-call
      {:mir/context-offset (get runtime-context-offsets
                                 (:gmir/runtime instruction))}
+     :gmir/capability-call
+     {:mir/context-offset (get capability-context-offsets
+                                (:gmir/kind instruction))}
      {})
    instruction))
 
@@ -778,7 +818,7 @@
                                        :mir/src (get-in state [:assigned value])
                                        :mir/slot (get slots value)})
                                     to-store)
-                       call-registers (subvec (argument-registers-for-call target op)
+                       call-registers (subvec (argument-registers-for-call target instruction)
                                               0 (count arguments))
                        copies (->> (map vector arguments call-registers)
                                    (keep (fn [[value register]]
@@ -800,6 +840,11 @@
                               (assoc :mir/callee (:mir/callee instruction))
                               (= :mir/runtime-call op)
                               (assoc :mir/runtime (:mir/runtime instruction)
+                                     :mir/context-offset
+                                     (:mir/context-offset instruction))
+                              (= :mir/capability-call op)
+                              (assoc :mir/capability (:mir/capability instruction)
+                                     :mir/kind (:mir/kind instruction)
                                      :mir/context-offset
                                      (:mir/context-offset instruction)))
                        state (-> state
@@ -1034,8 +1079,8 @@
               [(load-value instruction test r0)
                (assoc instruction :mir/test r0)]
 
-              (:mir/call :mir/runtime-call)
-              (let [call-registers (subvec (argument-registers-for-call target op)
+              (:mir/call :mir/runtime-call :mir/capability-call)
+              (let [call-registers (subvec (argument-registers-for-call target instruction)
                                            0 (count arguments))]
                 (concat
                  (mapv (fn [value register]
@@ -1047,6 +1092,10 @@
                     (= :mir/call op) (assoc :mir/callee callee)
                     (= :mir/runtime-call op)
                     (assoc :mir/runtime (:mir/runtime instruction)
+                           :mir/context-offset (:mir/context-offset instruction))
+                    (= :mir/capability-call op)
+                    (assoc :mir/capability (:mir/capability instruction)
+                           :mir/kind (:mir/kind instruction)
                            :mir/context-offset (:mir/context-offset instruction)))
                   (store-value instruction dst (get return-registers target))]))
 
