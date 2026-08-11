@@ -767,3 +767,36 @@
         (is (= [0] (mapv :mir/slot
                          (filter #(= :mir/spill-load (:mir/op %))
                                  instructions))) target)))))
+
+(deftest capability-call-selection-owns-kind-specific-context-and-abi
+  (doseq [target mir/targets
+          kind (keys gmir/capability-kinds)]
+    (let [program {:gmir/version 1
+                   :gmir/instructions
+                   [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                    {:gmir/op :gmir/capability-call :gmir/dst v1
+                     :gmir/capability 7 :gmir/kind kind
+                     :gmir/arguments [v0]}
+                    {:gmir/op :gmir/add :gmir/dst v2
+                     :gmir/left v0 :gmir/right v1}
+                    {:gmir/op :gmir/return :gmir/value v2}]}
+          selected (mir/select-target target program)
+          allocated (mir/allocate-registers selected)
+          call (first (filter #(= :mir/capability-call (:mir/op %))
+                              (:mir/instructions allocated)))]
+      (is (= (get mir/capability-context-offsets kind)
+             (:mir/context-offset call)) [target kind])
+      (is (= (get-in mir/capability-argument-registers [target kind])
+             (:mir/arguments call)) [target kind])
+      (is (= 7 (:mir/capability call)) [target kind])
+      (is (= kind (:mir/kind call)) [target kind])
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) [target kind])
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (mir/validate!
+                    (update-in allocated [:mir/instructions]
+                               (fn [instructions]
+                                 (mapv #(if (= :mir/capability-call (:mir/op %))
+                                          (assoc % :mir/context-offset 40)
+                                          %)
+                                       instructions)))))
+          [target kind]))))
