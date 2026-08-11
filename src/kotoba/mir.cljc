@@ -100,6 +100,7 @@
    :mir/call #{:mir/op :mir/dst :mir/callee :mir/arguments}
    :mir/runtime-call #{:mir/op :mir/dst :mir/runtime :mir/context-offset
                        :mir/arguments}
+   :mir/x86-privileged #{:mir/op :mir/dst :mir/action :mir/arguments}
    :mir/capability-call #{:mir/op :mir/dst :mir/capability :mir/kind
                           :mir/context-offset :mir/arguments}
    :mir/return #{:mir/op :mir/value}})
@@ -226,6 +227,14 @@
                                 (subvec (get runtime-argument-registers target)
                                         0 (count arguments))))
                 (reject! :physical-runtime-call-profile-violation instruction)))))
+        (when (= op :mir/x86-privileged)
+          (let [action (:mir/action instruction)
+                arguments (:mir/arguments instruction)
+                expected (get gmir/x86-privileged-action-arities action ::missing)]
+            (when-not (and (= :x86-64 target)
+                           (not= ::missing expected)
+                           (= expected (count arguments)))
+              (reject! :invalid-x86-privileged instruction))))
         (when (= op :mir/capability-call)
           (let [kind (:mir/kind instruction)
                 capability (:mir/capability instruction)
@@ -376,7 +385,8 @@
                             :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
                             :mir/greater-or-equal :mir/call :mir/runtime-call
-                            :mir/capability-call :mir/data-address}]
+                            :mir/capability-call :mir/x86-privileged
+                            :mir/data-address}]
             (doseq [[index instruction] (map-indexed vector instructions)
                     :when (contains? value-ops (:mir/op instruction))]
               (let [store (get instructions (inc index))]
@@ -431,6 +441,7 @@
               :gmir/content :mir/content
               :gmir/callee :mir/callee
               :gmir/runtime :mir/runtime
+              :gmir/action :mir/action
               :gmir/capability :mir/capability
               :gmir/kind :mir/kind
               :gmir/arguments :mir/arguments
@@ -464,6 +475,13 @@
   (when-not (contains? targets target)
     (reject! :unsupported-target {:target target}))
   (gmir/validate! program)
+  (let [instructions (if (= 3 (:gmir/version program))
+                       (mapcat :gmir/instructions (:gmir/functions program))
+                       (:gmir/instructions program))
+        privileged (filter #(= :gmir/x86-privileged (:gmir/op %)) instructions)]
+    (when (and (not= :x86-64 target) (seq privileged))
+      (reject! :x86-privileged-target-mismatch
+               {:target target :actions (mapv :gmir/action privileged)})))
   (validate!
    (if (= 3 (:gmir/version program))
      {:mir/version 3
@@ -877,9 +895,12 @@
                        allocated (reduce-kv
                                   (fn [out key value]
                                     (assoc out key
-                                           (if (gmir/vreg? value)
-                                             (get-in state [:assigned value])
-                                             value)))
+                                    (cond
+                                      (gmir/vreg? value)
+                                      (get-in state [:assigned value])
+                                      (and (= key :mir/arguments) (vector? value))
+                                      (mapv #(get-in state [:assigned %]) value)
+                                      :else value)))
                                   {} instruction)
                        state (update state :out conj allocated)]
                    (expire state index dst))))
@@ -946,9 +967,11 @@
                 allocated (reduce-kv
                            (fn [result key value]
                              (assoc result key
-                                    (if (gmir/vreg? value)
-                                      (get assigned value)
-                                      value)))
+                                    (cond
+                                      (gmir/vreg? value) (get assigned value)
+                                      (and (= key :mir/arguments) (vector? value))
+                                      (mapv assigned value)
+                                      :else value)))
                            {} instruction)
                 allocated (case (:mir/op allocated)
                             :mir/merge-store
@@ -1090,6 +1113,16 @@
                {:mir/op op :mir/dst r0 :mir/base r0 :mir/length r1
                 :mir/offset r2 :mir/size r3}
                (store-value instruction dst r0)]
+
+              :mir/x86-privileged
+              (let [argument-registers (subvec [r0 r1] 0 (count arguments))]
+                (concat
+                 (mapv (fn [value register]
+                         (load-value instruction value register))
+                       arguments argument-registers)
+                 [{:mir/op op :mir/dst r0 :mir/action (:mir/action instruction)
+                   :mir/arguments argument-registers}
+                  (store-value instruction dst r0)]))
 
               :mir/branch-zero
               [(load-value instruction test r0)

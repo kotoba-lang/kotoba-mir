@@ -133,6 +133,28 @@
         (is (some #(= mir-op (:mir/op %)) (:mir/instructions allocated)))
         (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))))
 
+(deftest x86-privileged-selection-is-target-scoped-and-allocatable
+  (let [program {:gmir/version 3 :gmir/entry 'main
+                 :gmir/functions
+                 [{:gmir/name 'main :gmir/arity 0
+                   :gmir/instructions
+                   [{:gmir/op :gmir/constant :gmir/dst v0 :gmir/value 1}
+                    {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 2}
+                    {:gmir/op :gmir/x86-privileged :gmir/dst v2
+                     :gmir/action :write-msr :gmir/arguments [v0 v1]}
+                    {:gmir/op :gmir/return :gmir/value v2}]}]}
+        selected (mir/select-target :x86-64 program)
+        allocated (mir/allocate-registers selected)
+        operation (first (filter #(= :mir/x86-privileged (:mir/op %))
+                                 (get-in allocated [:mir/functions 0
+                                                    :mir/instructions])))]
+    (is (= :write-msr (:mir/action operation)))
+    (is (= 2 (count (:mir/arguments operation))))
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"x86-privileged-target-mismatch"
+                          (mir/select-target :aarch64 program)))))
+
 (deftest allocation-spills-deterministically-when-the-scratch-profile-is-exhausted
   (let [registers (mapv gmir/vreg (range 11))
         program {:gmir/version 1

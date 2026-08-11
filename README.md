@@ -10,6 +10,8 @@ physical register state.
 - MIR v1 target and instruction contracts plus the versioned MIR v2 phi and
   MIR v3 function/call extensions;
 - GMIR-to-MIR target selection for the matching closed operation set;
+- x86-64-only admission for privileged actions, with structural rejection on
+  AArch64 before allocation;
 - deterministic allocation onto the v1 scratch-register profiles, with bounded
   stack-slot spills when live values exceed the physical profile;
 - deterministic v2 phi lowering with direct edge moves for acyclic multi-phi
