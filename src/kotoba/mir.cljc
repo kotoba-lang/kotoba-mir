@@ -1122,7 +1122,9 @@
                :mir/less-or-equal :mir/greater-or-equal)
               [(load-value instruction left r0)
                (load-value instruction right r1)
-               {:mir/op op :mir/dst r0 :mir/left r0 :mir/right r1}
+               (cond-> {:mir/op op :mir/dst r0 :mir/left r0 :mir/right r1}
+                 (= :mir/quotient-constant op)
+                 (assoc :mir/divisor (:mir/divisor instruction)))
                (store-value instruction dst r0)]
 
               :mir/f64-sqrt
