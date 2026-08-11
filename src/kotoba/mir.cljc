@@ -32,6 +32,9 @@
    :mir/bit-and #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/bit-or #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/bit-xor #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/shift-left #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/shift-right-signed #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/shift-right-unsigned #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/equal #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/less-than #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/greater-than #{:mir/op :mir/dst :mir/left :mir/right}
@@ -238,7 +241,8 @@
         (when (and (= :physical registers) (= :all-vregs frame-policy))
           (let [value-ops #{:mir/argument :mir/constant :mir/add :mir/subtract
                             :mir/multiply :mir/quotient :mir/bit-and :mir/bit-or
-                            :mir/bit-xor :mir/equal :mir/less-than
+                            :mir/bit-xor :mir/shift-left :mir/shift-right-signed
+                            :mir/shift-right-unsigned :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
                             :mir/greater-or-equal :mir/call}]
             (doseq [[index instruction] (map-indexed vector instructions)
@@ -817,6 +821,7 @@
 
               (:mir/add :mir/subtract :mir/multiply :mir/quotient
                :mir/bit-and :mir/bit-or :mir/bit-xor
+               :mir/shift-left :mir/shift-right-signed :mir/shift-right-unsigned
                :mir/equal :mir/less-than :mir/greater-than
                :mir/less-or-equal :mir/greater-or-equal)
               [(load-value instruction left r0)
