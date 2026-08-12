@@ -57,6 +57,8 @@
    :mir/add #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/subtract #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/multiply #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/multiply-add #{:mir/op :mir/dst :mir/left :mir/right :mir/addend}
+   :mir/multiply-subtract #{:mir/op :mir/dst :mir/left :mir/right :mir/addend}
    :mir/quotient #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/quotient-constant #{:mir/op :mir/dst :mir/left :mir/divisor}
    :mir/bit-and #{:mir/op :mir/dst :mir/left :mir/right}
@@ -170,9 +172,12 @@
         (when (and (= :virtual registers)
                    (contains? #{:mir/spill-load :mir/spill-store :mir/move} op))
           (reject! :physical-operation-in-virtual-program instruction))
+        (when (and (= :virtual registers)
+                   (contains? #{:mir/multiply-add :mir/multiply-subtract} op))
+          (reject! :target-selected-operation-in-virtual-program instruction))
         (doseq [register (concat
                           (keep instruction [:mir/dst :mir/src :mir/input
-                                             :mir/left :mir/right :mir/test
+                                             :mir/left :mir/right :mir/addend :mir/test
                                              :mir/base :mir/length
                                              :mir/stored :mir/offset :mir/size])
                           (when (vector? (:mir/arguments instruction))
@@ -483,7 +488,7 @@
    instruction))
 
 (defn- instruction-sources [instruction]
-  (concat (keep instruction [:mir/src :mir/input :mir/left :mir/right
+  (concat (keep instruction [:mir/src :mir/input :mir/left :mir/right :mir/addend
                              :mir/test :mir/value :mir/base :mir/length
                              :mir/stored :mir/offset :mir/size])
           (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8

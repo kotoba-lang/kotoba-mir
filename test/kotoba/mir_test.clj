@@ -11,6 +11,29 @@
 (def v5 (gmir/vreg 5))
 (def v6 (gmir/vreg 6))
 
+(deftest allocated-aarch64-admits-canonical-fused-multiply-operations
+  (let [base {:mir/version 1 :mir/target :aarch64 :mir/registers :physical
+              :mir/frame-slots 0}
+        instruction (fn [op]
+                      {:mir/op op :mir/dst :aarch64/x0
+                       :mir/left :aarch64/x1 :mir/right :aarch64/x2
+                       :mir/addend :aarch64/x3})]
+    (doseq [op [:mir/multiply-add :mir/multiply-subtract]]
+      (let [program (assoc base :mir/instructions
+                           [(instruction op)
+                            {:mir/op :mir/return :mir/value :aarch64/x0}])]
+        (is (= program (mir/validate! program)) op)
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (mir/validate! (update-in program [:mir/instructions 0]
+                                               dissoc :mir/addend))) op)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (mir/validate!
+                  {:mir/version 1 :mir/target :aarch64 :mir/registers :virtual
+                   :mir/instructions
+                   [{:mir/op :mir/multiply-add :mir/dst v0 :mir/left v1
+                     :mir/right v2 :mir/addend v3}]}))
+        "fusion is a physical target-selection operation")))
+
 (def program
   {:gmir/version 1
    :gmir/instructions
