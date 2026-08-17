@@ -32,15 +32,18 @@
             :string [:x86-64/r8]
             :option-i64 [:x86-64/r8]
             :result-i64 [:x86-64/r8]
-            :clock-v1 [:x86-64/r8]}
+            :clock-v1 [:x86-64/r8]
+            :dataspace-v1 [:x86-64/r8]}
    :aarch64 {:i64 [:aarch64/x2]
             :string [:aarch64/x4]
             :option-i64 [:aarch64/x4]
             :result-i64 [:aarch64/x4]
-            :clock-v1 [:aarch64/x4]}})
+            :clock-v1 [:aarch64/x4]
+            :dataspace-v1 [:aarch64/x4]}})
 
 (def capability-context-offsets
-  {:i64 48 :string 128 :option-i64 128 :result-i64 128 :clock-v1 128})
+  {:i64 48 :string 128 :option-i64 128 :result-i64 128 :clock-v1 128
+   :dataspace-v1 128})
 
 (def return-registers
   {:x86-64 :x86-64/rax
