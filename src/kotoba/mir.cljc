@@ -60,7 +60,10 @@
    :mir/add #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/subtract #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/multiply #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/multiply-add #{:mir/op :mir/dst :mir/left :mir/right :mir/addend}
+   :mir/multiply-subtract #{:mir/op :mir/dst :mir/left :mir/right :mir/addend}
    :mir/quotient #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/quotient-constant #{:mir/op :mir/dst :mir/left :mir/divisor}
    :mir/bit-and #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/bit-or #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/bit-xor #{:mir/op :mir/dst :mir/left :mir/right}
@@ -112,10 +115,12 @@
    :mir/return #{:mir/op :mir/value}})
 
 (def ^:private v1-operations
-  (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call))
+  (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call
+        :mir/quotient-constant))
 
 (def ^:private v2-operations
-  (disj (set (keys instruction-keysets)) :mir/call :mir/tail-call))
+  (disj (set (keys instruction-keysets)) :mir/call :mir/tail-call
+        :mir/quotient-constant))
 
 (def ^:private v3-operations
   (set (keys instruction-keysets)))
@@ -170,9 +175,12 @@
         (when (and (= :virtual registers)
                    (contains? #{:mir/spill-load :mir/spill-store :mir/move} op))
           (reject! :physical-operation-in-virtual-program instruction))
+        (when (and (= :virtual registers)
+                   (contains? #{:mir/multiply-add :mir/multiply-subtract} op))
+          (reject! :target-selected-operation-in-virtual-program instruction))
         (doseq [register (concat
                           (keep instruction [:mir/dst :mir/src :mir/input
-                                             :mir/left :mir/right :mir/test
+                                             :mir/left :mir/right :mir/addend :mir/test
                                              :mir/base :mir/length
                                              :mir/stored :mir/offset :mir/size])
                           (when (vector? (:mir/arguments instruction))
@@ -264,6 +272,9 @@
         (when (and (= op :mir/constant)
                    (not (gmir/i64-value? (:mir/value instruction))))
           (reject! :constant-not-i64 instruction))
+        (when (and (= op :mir/quotient-constant)
+                   (not (gmir/i64-value? (:mir/divisor instruction))))
+          (reject! :constant-divisor-not-i64 instruction))
         (when (and (= op :mir/data-address)
                    (not (string? (:mir/content instruction))))
           (reject! :invalid-data-content instruction))
@@ -380,7 +391,8 @@
           (reject! :call-frame-policy-violation function))
         (when (and (= :physical registers) (= :all-vregs frame-policy))
           (let [value-ops #{:mir/argument :mir/constant :mir/add :mir/subtract
-                            :mir/multiply :mir/quotient :mir/bit-and :mir/bit-or
+                            :mir/multiply :mir/quotient :mir/quotient-constant
+                            :mir/bit-and :mir/bit-or
                             :mir/bit-xor :mir/shift-left :mir/shift-right-signed
                             :mir/shift-right-unsigned
                             :mir/f64-add :mir/f64-subtract :mir/f64-multiply
@@ -478,6 +490,61 @@
      {})
    instruction))
 
+(defn- instruction-sources [instruction]
+  (concat (keep instruction [:mir/src :mir/input :mir/left :mir/right :mir/addend
+                             :mir/test :mir/value :mir/base :mir/length
+                             :mir/stored :mir/offset :mir/size])
+          (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
+                             :mir/kernel-load-u32 :mir/kernel-store-u32}
+                           (:mir/op instruction))
+            [(:mir/index instruction)])
+          (when (vector? (:mir/arguments instruction))
+            (:mir/arguments instruction))))
+
+(defn- select-instructions
+  "Select one function while retaining SSA constants long enough to choose a
+  target-independent constant-divisor operation. A divisor vreg disappears
+  from the closed operation after its literal value is captured. Its constant
+  definition is removed only when no other selected instruction consumes it."
+  [target instructions constant-division?]
+  (let [{:keys [out specialized-divisors]}
+        (reduce
+         (fn [{:keys [constants out specialized-divisors]} instruction]
+           (let [right (:gmir/right instruction)
+                 specialized? (and constant-division?
+                                   (= :gmir/quotient (:gmir/op instruction))
+                                   (contains? constants right))
+                 selected (select-instruction target instruction)
+                 selected (if specialized?
+                            (-> selected
+                                (assoc :mir/op :mir/quotient-constant
+                                       :mir/divisor (get constants right))
+                                (dissoc :mir/right))
+                            selected)
+                 constants (if (= :gmir/constant (:gmir/op instruction))
+                             (assoc constants (:gmir/dst instruction)
+                                    (:gmir/value instruction))
+                             constants)]
+             {:constants constants
+              :specialized-divisors (cond-> specialized-divisors
+                                      specialized? (conj right))
+              :out (conj out selected)}))
+         {:constants {} :specialized-divisors #{} :out []}
+         instructions)
+        ;; NBB represents admitted i64 literals as JavaScript BigInt values.
+        ;; They are not SSA identities and must not enter a CLJS hash-set
+        ;; (which would attempt object identity bookkeeping on a primitive).
+        live-sources (->> out
+                          (mapcat instruction-sources)
+                          (filter gmir/vreg?)
+                          set)]
+    (->> out
+         (remove (fn [{:mir/keys [op dst]}]
+                   (and (= :mir/constant op)
+                        (contains? specialized-divisors dst)
+                        (not (contains? live-sources dst)))))
+         vec)))
+
 (defn select-target
   "Select the closed GMIR operation set into target MIR, preserving vregs."
   [target program]
@@ -500,7 +567,7 @@
       :mir/functions
       (mapv (fn [{:gmir/keys [name arity instructions]}]
               {:mir/name name :mir/arity arity
-               :mir/instructions (mapv #(select-instruction target %) instructions)})
+               :mir/instructions (select-instructions target instructions true)})
             (:gmir/functions program))}
      {:mir/version (:gmir/version program)
       :mir/target target
@@ -509,15 +576,7 @@
                               (:gmir/instructions program))})))
 
 (defn- sources [instruction]
-  (concat (keep instruction [:mir/src :mir/input :mir/left :mir/right
-                             :mir/test :mir/value :mir/base :mir/length
-                             :mir/stored :mir/offset :mir/size])
-          (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
-                             :mir/kernel-load-u32 :mir/kernel-store-u32}
-                           (:mir/op instruction))
-            [(:mir/index instruction)])
-          (when (vector? (:mir/arguments instruction))
-            (:mir/arguments instruction))))
+  (instruction-sources instruction))
 
 (defn- preceding-label [instructions index]
   (loop [cursor (dec index)]
@@ -1077,6 +1136,12 @@
 
               :mir/merge-load
               []
+
+              :mir/quotient-constant
+              [(load-value instruction left r0)
+               {:mir/op op :mir/dst r0 :mir/left r0
+                :mir/divisor (:mir/divisor instruction)}
+               (store-value instruction dst r0)]
 
               (:mir/add :mir/subtract :mir/multiply :mir/quotient
                :mir/bit-and :mir/bit-or :mir/bit-xor

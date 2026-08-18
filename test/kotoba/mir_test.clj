@@ -11,6 +11,29 @@
 (def v5 (gmir/vreg 5))
 (def v6 (gmir/vreg 6))
 
+(deftest allocated-aarch64-admits-canonical-fused-multiply-operations
+  (let [base {:mir/version 1 :mir/target :aarch64 :mir/registers :physical
+              :mir/frame-slots 0}
+        instruction (fn [op]
+                      {:mir/op op :mir/dst :aarch64/x0
+                       :mir/left :aarch64/x1 :mir/right :aarch64/x2
+                       :mir/addend :aarch64/x3})]
+    (doseq [op [:mir/multiply-add :mir/multiply-subtract]]
+      (let [program (assoc base :mir/instructions
+                           [(instruction op)
+                            {:mir/op :mir/return :mir/value :aarch64/x0}])]
+        (is (= program (mir/validate! program)) op)
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (mir/validate! (update-in program [:mir/instructions 0]
+                                               dissoc :mir/addend))) op)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (mir/validate!
+                  {:mir/version 1 :mir/target :aarch64 :mir/registers :virtual
+                   :mir/instructions
+                   [{:mir/op :mir/multiply-add :mir/dst v0 :mir/left v1
+                     :mir/right v2 :mir/addend v3}]}))
+        "fusion is a physical target-selection operation")))
+
 (def program
   {:gmir/version 1
    :gmir/instructions
@@ -49,6 +72,54 @@
                          mir/allocate-registers)]
       (is (= (keyword "mir" (name op))
              (get-in allocated [:mir/instructions 2 :mir/op]))))))
+
+(deftest v3-selection-elides-an-exclusively-consumed-constant-divisor
+  (let [module {:gmir/version 3 :gmir/entry 'kernel
+                :gmir/functions
+                [{:gmir/name 'kernel :gmir/arity 1
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                   {:gmir/op :gmir/constant :gmir/dst v1
+                    :gmir/value 2147483647}
+                   {:gmir/op :gmir/quotient :gmir/dst v2
+                    :gmir/left v0 :gmir/right v1}
+                   {:gmir/op :gmir/return :gmir/value v2}]}]}
+        selected (mir/select-target :aarch64 module)
+        selected-instructions (get-in selected [:mir/functions 0 :mir/instructions])
+        quotient (first (filter #(= :mir/quotient-constant (:mir/op %))
+                                selected-instructions))
+        allocated (mir/allocate-registers selected)
+        physical (first (filter #(= :mir/quotient-constant (:mir/op %))
+                                (get-in allocated [:mir/functions 0
+                                                   :mir/instructions])))]
+    (is (= :mir/quotient-constant (:mir/op quotient)))
+    (is (= 2147483647 (:mir/divisor quotient)))
+    (is (not (contains? quotient :mir/right)))
+    (is (not-any? #(= v1 (:mir/dst %)) selected-instructions)
+        "the divisor definition is dead after the literal enters MIR")
+    (is (= 2147483647 (:mir/divisor physical)))
+    (is (not (contains? physical :mir/right)))
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
+
+(deftest v3-selection-preserves-a-constant-divisor-with-another-use
+  (let [module {:gmir/version 3 :gmir/entry 'kernel
+                :gmir/functions
+                [{:gmir/name 'kernel :gmir/arity 1
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                   {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 7}
+                   {:gmir/op :gmir/quotient :gmir/dst v2
+                    :gmir/left v0 :gmir/right v1}
+                   {:gmir/op :gmir/add :gmir/dst v3
+                    :gmir/left v2 :gmir/right v1}
+                   {:gmir/op :gmir/return :gmir/value v3}]}]}
+        selected (mir/select-target :x86-64 module)
+        selected-instructions (get-in selected [:mir/functions 0 :mir/instructions])]
+    (is (= :mir/constant (:mir/op (second selected-instructions))))
+    (is (= v1 (:mir/dst (second selected-instructions))))
+    (is (= :mir/quotient-constant (:mir/op (nth selected-instructions 2))))
+    (is (not (contains? (nth selected-instructions 2) :mir/right)))
+    (is (= v1 (:mir/right (nth selected-instructions 3))))))
 
 (deftest selection-and-allocation-cover-the-f64-family
   (doseq [target mir/targets
