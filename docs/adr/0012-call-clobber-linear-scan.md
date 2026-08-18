@@ -2,7 +2,31 @@
 
 ## Status
 
-Accepted.
+Accepted, and **defective as implemented**. Do not advance amu onto this pin.
+
+Measured 2026-08-18 through amu, which executes native code:
+
+| kotoba-mir | amu suite |
+|---|---|
+| `8872a54` (before) | 1094 tests, 0 failures |
+| `7f7c556` (this) | 1096 tests, **62 failures** |
+
+60 of them are string search, split **30 AArch64 / 30 x86-64**. An even split
+across two independent encoders puts the fault in the shared allocator.
+
+```
+(defn main [] (if (string-contains? "abcdef" "def") 1 0))   ; => 0, expected 1
+```
+
+`string-replace-all` returns wrong content and wrong byte lengths, and one
+multi-byte case traps. Cases expecting "absent" largely still pass, so the
+search loop fails to *find* rather than failing outright.
+
+Neither this repository's suite nor kotoba-native's can report any of it.
+Both inspect encodings, frame policy and slot counts; neither runs a compiled
+program, so no result either can produce distinguishes this implementation
+from a correct one. The Consequences section below anticipated exactly this
+and it still happened.
 
 ## Context
 
@@ -33,6 +57,28 @@ into all-vreg.
 
 Physical functions produced this way declare `:call-live`. `:all-vregs`
 remains the fallback.
+
+`back-edge?` (added 2026-08-18) sends a call-containing function with a
+backward `:mir/jump` or `:mir/branch-zero` to `:all-vregs` before the scanner
+sees it. `last-uses` records only the highest instruction *index* at which a
+vreg is a source -- it reads no label and no branch target -- so a value's
+interval ends at its textually last use. That is sound while the scanner only
+sees straight-line functions, where textual order is execution order; a back
+edge re-reads a value after its register has been given away. This is the
+`:cfg-liveness false` claim below, stated as a defect rather than as a
+limitation.
+
+**It is necessary and not sufficient, measured rather than assumed: 62
+failures become 61.** It fixes
+`let-composes-with-recursion-within-the-fuel-budget` and does not touch string
+search, so whatever loop `string-contains?` and `string-replace-all` lower to
+is not a backward jump this predicate sees. The rest of the fault is not yet
+located. Do not read the predicate as the fix.
+
+Shapes measured correct, so the defect is narrower than "calls plus control
+flow": a call with ten values live across it read in a branch arm; two calls
+with the first result live across the second; a call result used directly as
+a branch condition; `kernel_call_branch` and `kernel_call_deep_branch`.
 
 ## Consequences
 

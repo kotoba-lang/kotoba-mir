@@ -1,5 +1,5 @@
 {:adr/id 12
- :adr/status :accepted
+ :adr/status :accepted-defective
  :decision :call-clobber-linear-scan
  :supersedes {:adr/id 6 :scope :control-flow-all-vregs}
  :contract {:mir/version 3
@@ -9,6 +9,61 @@
             :call-clobbers :caller-saved
             :live-across-preference :preserved-tier
             :spill-placement :at-definition}
+ ;; Measured 2026-08-18 through amu, which executes native code. This
+ ;; implementation returns wrong answers. The decision is not withdrawn; the
+ ;; implementation is not safe to consume.
+ ;;
+ ;;   amu on 8872a54 (before this ADR): 1094 tests, 0 failures
+ ;;   amu on 7f7c556 (this ADR):        1096 tests, 62 failures
+ ;;
+ ;; 60 of them are string search, split 30 AArch64 / 30 x86-64. An even split
+ ;; across two independent encoders puts the fault in this shared allocator.
+ ;;
+ ;;   (defn main [] (if (string-contains? "abcdef" "def") 1 0))  => 0
+ ;;
+ ;; `string-replace-all` returns wrong content and wrong byte lengths, and one
+ ;; multi-byte case traps. Cases expecting "absent" largely still pass, so the
+ ;; search loop fails to FIND rather than failing outright.
+ ;;
+ ;; Partial cause, confirmed. `last-uses` records the highest instruction INDEX
+ ;; at which a vreg is a source; it reads no label and no branch target. That
+ ;; was sound while this scanner only saw straight-line functions, where
+ ;; textual order is execution order. Routing control flow to it lets a back
+ ;; edge re-read a value whose interval has ended.
+ ;;
+ ;; `back-edge?` now sends call-containing functions with a backward
+ ;; `:mir/jump` or `:mir/branch-zero` to all-vreg. That is necessary and NOT
+ ;; sufficient, measured rather than assumed:
+ ;;
+ ;;   without it: 62 failures   with it: 61 failures
+ ;;
+ ;; It fixes `let-composes-with-recursion-within-the-fuel-budget` and does not
+ ;; touch string search at all -- so whatever loop `string-contains?` and
+ ;; `string-replace-all` lower to is not a backward jump this predicate sees,
+ ;; and the remaining fault is not yet located. Do not read the predicate as
+ ;; the fix.
+ ;;
+ ;; Shapes that are correct, so the defect is narrower than "calls plus
+ ;; control flow": call + `if` with 10 values live across the call; two calls
+ ;; with the first result live across the second; a call result used directly
+ ;; as a branch condition; kernel_call_branch and kernel_call_deep_branch.
+ :defect {:since "7f7c55691697ba25abf6d732870a159433ce1fab"
+          :reproducer "(defn main [] (if (string-contains? \"abcdef\" \"def\") 1 0))"
+          :expected 1
+          :actual 0
+          :downstream "amu: 62 failures (60 string search, 30 per ISA)"
+          :also #{:string-replace-all-wrong-content
+                  :string-replace-all-wrong-byte-length
+                  :multi-byte-case-traps}
+          :partial-cause :textual-last-use-across-a-back-edge
+          :partial-fix {:predicate :back-edge?
+                        :fixes #{:let-composes-with-recursion-within-the-fuel-budget}
+                        :does-not-fix #{:string-contains? :string-replace-all}
+                        :measured "62 failures -> 61"}
+          :not-yet-located "the loop string search lowers to is not a backward :mir/jump"
+          :invisible-to #{"kotoba-mir suite" "kotoba-native suite"}
+          :why-invisible "neither repository executes a compiled program"
+          :do-not "advance amu onto this pin"}
  :fallbacks #{:register-pressure}
  :claims {:cfg-liveness false
           :spill-slot-coloring false
