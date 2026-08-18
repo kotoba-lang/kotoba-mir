@@ -793,6 +793,38 @@
 (defn- ordered-vregs [values]
   (sort-by (fn [value] (or (:gmir/id value) (str value))) values))
 
+(defn- use-indexes
+  "Every instruction index at which VALUE is a source, in order."
+  [instructions]
+  (reduce-kv
+   (fn [uses index instruction]
+     (reduce (fn [indexes value]
+               (update indexes value (fnil conj []) index))
+             uses
+             (distinct (filter gmir/vreg? (sources instruction)))))
+   {} instructions))
+
+(defn- next-use-of [indexes index value]
+  (some (fn [use]
+          (when (>= use index) use))
+        (get indexes value)))
+
+(defn- furthest-victim
+  "The assigned value with the furthest next use, excluding PROTECTED
+  operands. Ties keep the earlier ordered-vregs entry so the choice does
+  not depend on hash-map iteration."
+  [assigned indexes index protected]
+  (let [candidates (filterv (fn [value]
+                              (not (contains? protected value)))
+                            (ordered-vregs (keys assigned)))]
+    (when (seq candidates)
+      (reduce (fn [best value]
+                (let [best-use (or (next-use-of indexes index best) -1)
+                      value-use (or (next-use-of indexes index value) -1)]
+                  (if (> value-use best-use) value best)))
+              (first candidates)
+              (rest candidates)))))
+
 (defn- expire-assigned
   "Remove VALUES from STATE's assignment without returning a register that is
   still owned by another SSA value (the latter occurs after a dying-left
@@ -1046,104 +1078,157 @@
           :mir/instructions (:out result)}))))))
 
 (defn- allocate-without-spills
+  "Linear-scan allocation. The pool grows on demand; when it is empty the
+  live value with the furthest next use is stored, not every SSA value.
+  A body that fits never reaches the spill step, so its assignment is
+  byte-for-byte what it was."
   [{:mir/keys [version target registers instructions] :as program} merge-slots]
   (when-not (= :virtual registers)
     (reject! :registers-not-virtual program))
   (let [last-use (last-uses instructions)
+        indexes (use-indexes instructions)
         pool (allocator-pool target {:leaf? true})
         entry (entry-argument-plan target pool instructions last-use
                                    merge-slots {})]
-    ;; RESERVE is the pool behind the scratch tier, handed out one register at a
-    ;; time and only once the free list is empty. Offering the whole pool up
-    ;; front would change where every value in every small body lands -- and
-    ;; would walk a three-register body into the preserved tier, where each
-    ;; register costs a save and a restore. Growing on demand leaves a body that
-    ;; fits in the scratch tier byte-for-byte what it was.
-    (loop [index (:argument-count entry), remaining (:remaining entry)
-           assigned (:assigned entry), free (:free entry)
-           reserve (:reserve entry)
-           backed (:entry-spills entry)
-           out (:instructions entry), used-temp? (:used-temp? entry)]
-      (if-let [instruction (first remaining)]
-        (let [srcs (distinct (filter gmir/vreg? (sources instruction)))
-              loaded (reduce (fn [{:keys [assigned free reserve out] :as state} source]
-                               (if (contains? assigned source)
-                                 state
-                                 (let [slot (get backed source)
-                                       from-free (first free)
-                                       register (or from-free (first reserve))]
-                                   (when-not (and (some? slot) register)
-                                     (reject! :spill-required instruction))
-                                   {:assigned (assoc assigned source register)
-                                    :free (if from-free (vec (rest free)) free)
-                                    :reserve (if from-free reserve (vec (rest reserve)))
-                                    :out (conj out {:mir/op :mir/spill-load
-                                                    :mir/dst register
-                                                    :mir/slot slot})})))
-                             {:assigned assigned :free free :reserve reserve :out out}
-                             srcs)
-              assigned (:assigned loaded)
-              free (:free loaded)
-              reserve (:reserve loaded)
-              out (:out loaded)]
-          (let [dst (:mir/dst instruction)
-                [assigned free reserve]
-                (if (gmir/vreg? dst)
-                  (do
-                    (when (contains? assigned dst)
-                      (reject! :multiple-definition instruction))
-                    (let [dying-left (when (and (gmir/vreg? (:mir/left instruction))
-                                                (= index (get last-use
-                                                              (:mir/left instruction))))
-                                       (get assigned (:mir/left instruction)))
-                          ;; A free scratch register first, then the left
-                          ;; operand's register if this was its last use, and
-                          ;; only then a register from the reserve. The first
-                          ;; two are what the allocator already did; growing the
-                          ;; pool is what it used to have instead of a way to
-                          ;; continue.
-                          from-free (first free)
-                          register (or from-free dying-left (first reserve))]
-                      (when-not register
-                        (reject! :spill-required instruction))
-                      [(assoc assigned dst register)
-                       (if from-free (vec (rest free)) free)
-                       (if (or from-free dying-left) reserve (vec (rest reserve)))]))
-                  [assigned free reserve])
-                allocated (reduce-kv
-                           (fn [result key value]
-                             (assoc result key
-                                    (cond
-                                      (gmir/vreg? value) (get assigned value)
-                                      (and (= key :mir/arguments) (vector? value))
-                                      (mapv assigned value)
-                                      :else value)))
-                           {} instruction)
-                allocated (case (:mir/op allocated)
-                            :mir/merge-store
-                            {:mir/op :mir/spill-store
-                             :mir/src (:mir/src allocated)
-                             :mir/slot (:mir/slot allocated)}
-                            :mir/merge-load
-                            {:mir/op :mir/spill-load
-                             :mir/dst (:mir/dst allocated)
-                             :mir/slot (:mir/slot allocated)}
-                            allocated)
-                expired (filter #(or (= index (get last-use %))
-                                     (and (= dst %)
-                                          (not (contains? last-use %))))
-                                (keys assigned))
-                state (expire-assigned {:assigned assigned :free free} expired)]
-            (recur (inc index) (next remaining)
-                   (:assigned state) (vec (:free state)) reserve
-                   backed (conj out allocated) used-temp?)))
-        (validate-flat!
-         {:mir/version version
-          :mir/target target
-          :mir/registers :physical
-          :mir/frame-slots (+ (:stable-slot-count entry)
-                              (if used-temp? 1 0))
-          :mir/instructions out})))))
+    (letfn [(spill-assigned [state value instruction]
+              (let [register (get-in state [:assigned value])]
+                (when-not register
+                  (reject! :spill-required instruction))
+                (let [existing (get-in state [:backed value])
+                      slot (or existing (:next-slot state))
+                      next-slot (if existing
+                                  (:next-slot state)
+                                  (inc (:next-slot state)))]
+                  (when (> next-slot 4095)
+                    (reject! :spill-frame-too-large {:frame-slots next-slot}))
+                  (-> state
+                      (assoc-in [:backed value] slot)
+                      (assoc :next-slot next-slot)
+                      (update :out conj {:mir/op :mir/spill-store
+                                         :mir/src register
+                                         :mir/slot slot})
+                      (update :assigned dissoc value)
+                      (update :free conj register)))))
+            (take-register [state instruction protected]
+              (let [from-free (first (:free state))]
+                (if from-free
+                  [(assoc state :free (vec (rest (:free state)))) from-free]
+                  (let [from-reserve (first (:reserve state))]
+                    (if from-reserve
+                      [(assoc state :reserve (vec (rest (:reserve state))))
+                       from-reserve]
+                      (if-let [victim (or (furthest-victim (:assigned state)
+                                                           indexes
+                                                           (:index state)
+                                                           protected)
+                                          (furthest-victim (:assigned state)
+                                                           indexes
+                                                           (:index state)
+                                                           #{}))]
+                        (let [register (get-in state [:assigned victim])
+                              state (spill-assigned state victim instruction)]
+                          [(assoc state :free (vec (rest (:free state))))
+                           register])
+                        (reject! :spill-required instruction)))))))]
+      (loop [index (:argument-count entry), remaining (:remaining entry)
+             assigned (:assigned entry), free (:free entry)
+             reserve (:reserve entry)
+             backed (:entry-spills entry)
+             next-slot (:stable-slot-count entry)
+             out (:instructions entry), used-temp? (:used-temp? entry)]
+        (if-let [instruction (first remaining)]
+          (let [srcs (distinct (filter gmir/vreg? (sources instruction)))
+                protected (set srcs)
+                loaded (reduce (fn [state source]
+                                 (if (contains? (:assigned state) source)
+                                   state
+                                   (let [slot (get (:backed state) source)]
+                                     (when-not slot
+                                       (reject! :spill-required instruction))
+                                     (let [[state register]
+                                           (take-register (assoc state :index index)
+                                                          instruction
+                                                          protected)]
+                                       (-> state
+                                           (assoc-in [:assigned source] register)
+                                           (update :out conj {:mir/op :mir/spill-load
+                                                              :mir/dst register
+                                                              :mir/slot slot}))))))
+                               {:assigned assigned :free free :reserve reserve
+                                :backed backed :next-slot next-slot
+                                :out out :index index}
+                               srcs)
+                assigned (:assigned loaded)
+                free (:free loaded)
+                reserve (:reserve loaded)
+                backed (:backed loaded)
+                next-slot (:next-slot loaded)
+                out (:out loaded)]
+            (let [dst (:mir/dst instruction)
+                  [assigned free reserve backed next-slot out]
+                  (if (gmir/vreg? dst)
+                    (do
+                      (when (contains? assigned dst)
+                        (reject! :multiple-definition instruction))
+                      (let [dying-left (when (and (gmir/vreg? (:mir/left instruction))
+                                                  (= index (get last-use
+                                                                (:mir/left instruction))))
+                                         (get assigned (:mir/left instruction)))
+                            from-free (first free)
+                            register (or from-free dying-left)
+                            [state register]
+                            (if register
+                              [{:assigned assigned :free (if from-free
+                                                           (vec (rest free))
+                                                           free)
+                                :reserve reserve :backed backed
+                                :next-slot next-slot :out out :index index}
+                               register]
+                              (take-register {:assigned assigned :free free
+                                              :reserve reserve :backed backed
+                                              :next-slot next-slot :out out
+                                              :index index}
+                                             instruction
+                                             protected))]
+                        [(assoc (:assigned state) dst register)
+                         (:free state) (:reserve state)
+                         (:backed state) (:next-slot state) (:out state)]))
+                    [assigned free reserve backed next-slot out])
+                  allocated (reduce-kv
+                             (fn [result key value]
+                               (assoc result key
+                                      (cond
+                                        (gmir/vreg? value) (get assigned value)
+                                        (and (= key :mir/arguments) (vector? value))
+                                        (mapv assigned value)
+                                        :else value)))
+                             {} instruction)
+                  allocated (case (:mir/op allocated)
+                              :mir/merge-store
+                              {:mir/op :mir/spill-store
+                               :mir/src (:mir/src allocated)
+                               :mir/slot (:mir/slot allocated)}
+                              :mir/merge-load
+                              {:mir/op :mir/spill-load
+                               :mir/dst (:mir/dst allocated)
+                               :mir/slot (:mir/slot allocated)}
+                              allocated)
+                  expired (filter #(or (= index (get last-use %))
+                                       (and (= dst %)
+                                            (not (contains? last-use %))))
+                                  (keys assigned))
+                  state (expire-assigned {:assigned assigned :free free} expired)]
+              (recur (inc index) (next remaining)
+                     (:assigned state) (vec (:free state)) reserve
+                     backed next-slot
+                     (conj out allocated) used-temp?)))
+          (validate-flat!
+           {:mir/version version
+            :mir/target target
+            :mir/registers :physical
+            :mir/frame-slots (+ next-slot
+                                (if used-temp? 1 0))
+            :mir/instructions out}))))))
 
 (defn- spill-slots [instructions offset]
   (:slots
@@ -1319,8 +1404,9 @@
           instructions))}))))
 
 (defn- allocate-flat
-  "Allocate virtual MIR deterministically, inserting bounded stack-slot spills
-  when the target scratch profile is exhausted."
+  "Allocate virtual MIR deterministically. No-call bodies spill only values
+  that do not fit; calls and remaining register pressure keep the
+  conservative all-vreg path."
   [program]
   (validate-flat! program)
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)]
@@ -1339,8 +1425,9 @@
   "Allocate a legacy flat program or every function in a v3 module. A function
   containing a straight-line call stores only values live across that call and
   reloads them lazily. Entry arguments beyond the four-register allocator
-  profile use bounded direct ABI spills. Complex control flow and remaining
-  register pressure retain the conservative all-vreg path."
+  profile use bounded direct ABI spills. Calls and leftover pressure that
+  the linear allocator cannot spill into still take the conservative
+  all-vreg path."
   [{:mir/keys [version target registers entry functions] :as program}]
   (validate! program)
   (if (= 3 version)

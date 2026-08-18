@@ -12,16 +12,17 @@ physical register state.
 - GMIR-to-MIR target selection for the matching closed operation set;
 - x86-64-only admission for privileged actions, with structural rejection on
   AArch64 before allocation;
-- deterministic allocation onto the v1 scratch-register profiles, with bounded
-  stack-slot spills when live values exceed the physical profile;
+- deterministic allocation onto the v1 scratch-register profiles, growing
+  into the leaf and preserved tiers on demand, then spilling only the live
+  values that still do not fit;
 - deterministic v2 phi lowering with direct edge moves for acyclic multi-phi
   joins, one reusable temporary frame slot for cyclic parallel copies, and
   destination-slot coalescing in the general spill path;
 - fail-closed validation of virtual and physical MIR.
 - independent per-function frames and liveness-minimal preservation for
   straight-line scalar direct calls, including parallel assignment into five
-  ABI registers; CFG/phi and excess-pressure cases retain deterministic
-  all-vreg preservation;
+  ABI registers; CFG/phi joins stay on the linear allocator, and calls that
+  cannot complete that way retain deterministic all-vreg preservation;
 - canonical ABI input markers plus parallel function-entry assignment: four
   simultaneously used scalar parameters stay in registers with a zero-slot
   frame on x86-64 and AArch64; a fifth live parameter is stored directly from
