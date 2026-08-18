@@ -7,8 +7,53 @@
 (def targets #{:x86-64 :aarch64})
 
 (def physical-registers
+  "The always-available scratch tier. Every allocation path may use these, and
+  the conservative all-vreg path uses only these."
   {:x86-64 [:x86-64/rax :x86-64/rcx :x86-64/rdx :x86-64/r8]
    :aarch64 [:aarch64/x0 :aarch64/x1 :aarch64/x2 :aarch64/x3]})
+
+(def leaf-registers
+  "Caller-saved registers a function that calls nothing may use without saving
+  anything. On x86-64 these are the incoming argument registers, dead once the
+  entry plan has copied the arguments out; on AArch64 they are the temporaries
+  below the encoder's own scratch pair. A function that makes a call must not
+  use them, so only the no-call paths are offered this tier."
+  {:x86-64 [:x86-64/rdi :x86-64/rsi]
+   :aarch64 [:aarch64/x5 :aarch64/x6 :aarch64/x8 :aarch64/x9
+             :aarch64/x10 :aarch64/x11 :aarch64/x12]})
+
+(def preserved-registers
+  "Callee-saved registers. Available on every path, at the cost of a save and a
+  restore in the frame for exactly the ones a function actually assigns --
+  which is why allocation reports them rather than the frame guessing."
+  {:x86-64 [:x86-64/rbx :x86-64/r12 :x86-64/r13 :x86-64/r14 :x86-64/r15]
+   :aarch64 [:aarch64/x19 :aarch64/x20 :aarch64/x21 :aarch64/x22
+             :aarch64/x23 :aarch64/x24 :aarch64/x25 :aarch64/x26]})
+
+(defn allocator-pool
+  "The registers an allocation path may hand out. The scratch tier comes first
+  so that a function small enough to stay inside it costs no frame save; the
+  preserved tier comes last for the same reason."
+  [target {:keys [leaf?]}]
+  (vec (concat (get physical-registers target)
+               (when leaf? (get leaf-registers target))
+               (get preserved-registers target))))
+
+(defn saved-registers
+  "Which preserved registers a physical instruction sequence names, in pool
+  order, so a frame can save them in order and restore them in reverse.
+
+  Derived rather than carried: a field saying which registers a body uses has
+  to be kept equal to the body, and the two drift silently in the direction
+  that omits a save. Encoders call this on the stream they are about to emit."
+  [target instructions]
+  (let [preserved (set (get preserved-registers target))]
+    (into []
+          (filter (into #{} (mapcat (fn [instruction]
+                                      (filter preserved
+                                              (tree-seq coll? seq instruction)))
+                                    instructions)))
+          (get preserved-registers target))))
 
 (def call-argument-registers
   {:x86-64 [:x86-64/rdi :x86-64/rsi :x86-64/rdx :x86-64/rcx :x86-64/r8]
@@ -134,6 +179,8 @@
 
 (defn- physical-register? [target value]
   (contains? (set (concat (get physical-registers target)
+                          (get leaf-registers target)
+                          (get preserved-registers target)
                           (get call-argument-registers target)))
              value))
 
@@ -749,7 +796,14 @@
 (defn- expire-assigned
   "Remove VALUES from STATE's assignment without returning a register that is
   still owned by another SSA value (the latter occurs after a dying-left
-  destination coalesces onto its source register)."
+  destination coalesces onto its source register).
+
+  Freed registers return to the end of the free list, so a register is reused
+  only after every other free one has been. That ordering is what the encoders'
+  byte-exact expectations were written against, and it is why the pool grows on
+  demand instead of being offered whole: handing out a wide pool up front makes
+  a body needing three registers touch all of them, reach the preserved tier,
+  and pay a save and a restore it never needed."
   [state values]
   (let [expired (vec (ordered-vregs values))
         assigned (:assigned state)
@@ -765,14 +819,14 @@
   bounded set of direct entry spills and a parallel copy into allocator
   registers. Unused inputs need only their marker. Inputs beyond the allocator
   profile are backed directly from their ABI registers and loaded lazily."
-  [target instructions last-use slot-base stable-slots]
+  [target pool instructions last-use slot-base stable-slots]
   (let [[arguments remaining] (split-with #(= :mir/argument (:mir/op %))
                                           instructions)]
     (when (some #(= :mir/argument (:mir/op %)) remaining)
       (reject! :spill-required {:problem :non-prefix-argument}))
     (let [arguments (vec arguments)
           remaining (vec remaining)
-          allocator-registers (get physical-registers target)
+          allocator-registers pool
           abi-registers (get call-argument-registers target)
           used (filterv #(contains? last-use (:mir/dst %)) arguments)]
       (let [register-count (min (count used) (count allocator-registers))
@@ -812,7 +866,10 @@
          :stable-slots (merge stable-slots entry-spills)
          :stable-slot-count next-slot
          :temp-slot next-slot
-         :free (vec (remove owned allocator-registers))
+         :free (vec (remove owned (take (count (get physical-registers target))
+                                        allocator-registers)))
+         :reserve (vec (remove owned (drop (count (get physical-registers target))
+                                           allocator-registers)))
          :instructions (into markers (concat stores (:instructions scheduled)))
          :used-temp? (:used-temp? scheduled)}))))
 
@@ -855,10 +912,10 @@
     (reject! :registers-not-virtual program))
   (let [last-use (last-uses instructions)
         call-slots (call-live-slots instructions)
-        allocator-registers (get physical-registers target)
+        allocator-registers (allocator-pool target {:leaf? false})
         return-register (get return-registers target)]
-    (let [entry (entry-argument-plan target instructions last-use
-                                     (count call-slots) call-slots)
+    (let [entry (entry-argument-plan target allocator-registers instructions
+                                     last-use (count call-slots) call-slots)
           slots (:stable-slots entry)
           temp-slot (:temp-slot entry)]
       (when (> (+ (:stable-slot-count entry) 1) 4095)
@@ -993,32 +1050,44 @@
   (when-not (= :virtual registers)
     (reject! :registers-not-virtual program))
   (let [last-use (last-uses instructions)
-        entry (entry-argument-plan target instructions last-use merge-slots {})]
+        pool (allocator-pool target {:leaf? true})
+        entry (entry-argument-plan target pool instructions last-use
+                                   merge-slots {})]
+    ;; RESERVE is the pool behind the scratch tier, handed out one register at a
+    ;; time and only once the free list is empty. Offering the whole pool up
+    ;; front would change where every value in every small body lands -- and
+    ;; would walk a three-register body into the preserved tier, where each
+    ;; register costs a save and a restore. Growing on demand leaves a body that
+    ;; fits in the scratch tier byte-for-byte what it was.
     (loop [index (:argument-count entry), remaining (:remaining entry)
            assigned (:assigned entry), free (:free entry)
+           reserve (:reserve entry)
            backed (:entry-spills entry)
            out (:instructions entry), used-temp? (:used-temp? entry)]
       (if-let [instruction (first remaining)]
         (let [srcs (distinct (filter gmir/vreg? (sources instruction)))
-              loaded (reduce (fn [{:keys [assigned free out] :as state} source]
+              loaded (reduce (fn [{:keys [assigned free reserve out] :as state} source]
                                (if (contains? assigned source)
                                  state
                                  (let [slot (get backed source)
-                                       register (first free)]
+                                       from-free (first free)
+                                       register (or from-free (first reserve))]
                                    (when-not (and (some? slot) register)
                                      (reject! :spill-required instruction))
                                    {:assigned (assoc assigned source register)
-                                    :free (vec (rest free))
+                                    :free (if from-free (vec (rest free)) free)
+                                    :reserve (if from-free reserve (vec (rest reserve)))
                                     :out (conj out {:mir/op :mir/spill-load
                                                     :mir/dst register
                                                     :mir/slot slot})})))
-                             {:assigned assigned :free free :out out}
+                             {:assigned assigned :free free :reserve reserve :out out}
                              srcs)
               assigned (:assigned loaded)
               free (:free loaded)
+              reserve (:reserve loaded)
               out (:out loaded)]
           (let [dst (:mir/dst instruction)
-                [assigned free]
+                [assigned free reserve]
                 (if (gmir/vreg? dst)
                   (do
                     (when (contains? assigned dst)
@@ -1027,12 +1096,20 @@
                                                 (= index (get last-use
                                                               (:mir/left instruction))))
                                        (get assigned (:mir/left instruction)))
-                          register (or (first free) dying-left)]
+                          ;; A free scratch register first, then the left
+                          ;; operand's register if this was its last use, and
+                          ;; only then a register from the reserve. The first
+                          ;; two are what the allocator already did; growing the
+                          ;; pool is what it used to have instead of a way to
+                          ;; continue.
+                          from-free (first free)
+                          register (or from-free dying-left (first reserve))]
                       (when-not register
                         (reject! :spill-required instruction))
                       [(assoc assigned dst register)
-                       (if (seq free) (vec (rest free)) free)]))
-                  [assigned free])
+                       (if from-free (vec (rest free)) free)
+                       (if (or from-free dying-left) reserve (vec (rest reserve)))]))
+                  [assigned free reserve])
                 allocated (reduce-kv
                            (fn [result key value]
                              (assoc result key
@@ -1058,7 +1135,7 @@
                                 (keys assigned))
                 state (expire-assigned {:assigned assigned :free free} expired)]
             (recur (inc index) (next remaining)
-                   (:assigned state) (vec (:free state))
+                   (:assigned state) (vec (:free state)) reserve
                    backed (conj out allocated) used-temp?)))
         (validate-flat!
          {:mir/version version
