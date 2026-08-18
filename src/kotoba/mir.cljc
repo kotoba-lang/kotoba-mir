@@ -1592,6 +1592,33 @@
               (reject! :unsupported-spill-operation instruction)))
           instructions))}))))
 
+(defn- back-edge?
+  "Does any jump or branch in INSTRUCTIONS target a label at or before it?
+
+  `last-uses` records the highest instruction INDEX at which a vreg is a
+  source. It reads no label and no branch target, so a value's interval ends
+  at its textually last use. That is sound exactly while textual order is
+  execution order. A back edge re-reads a value after its interval has ended
+  and its register has been given to something else, which is silent wrong
+  code, not a missing optimisation.
+
+  ADR 0012 routes functions with control flow to the linear scanner. Until
+  its `:cfg-liveness` claim is true, the ones with a back edge keep the
+  conservative all-vreg path they had before. Forward-only control flow --
+  the `if` the ADR was written for -- still gets the scanner."
+  [instructions]
+  (let [label-index (reduce-kv (fn [indexes index instruction]
+                                 (if (= :mir/label (:mir/op instruction))
+                                   (assoc indexes (:mir/id instruction) index)
+                                   indexes))
+                               {} instructions)]
+    (boolean
+     (some (fn [[index instruction]]
+             (and (contains? #{:mir/jump :mir/branch-zero} (:mir/op instruction))
+                  (when-let [target (get label-index (:mir/target instruction))]
+                    (<= target index))))
+           (map-indexed vector instructions)))))
+
 (defn- allocate-with-policy
   "Try the linear scanner, including call-clobber handling. A function that
   still cannot complete falls back to the conservative all-vreg path. Returns
@@ -1601,7 +1628,9 @@
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)
         calls? (boolean (some #(call-operation? (:mir/op %))
                               (:mir/instructions program)))]
-    (try
+    (if (and calls? (back-edge? (:mir/instructions program)))
+      [(allocate-with-spills program merge-dst-by-slot) :all-vregs]
+      (try
       (let [allocated (coalesce-phi-transports
                        (allocate-without-spills program merge-slots)
                        merge-slots)]
@@ -1610,7 +1639,7 @@
         (if (= :spill-required (:problem (ex-data error)))
           [(allocate-with-spills program merge-dst-by-slot)
            (if calls? :all-vregs :allocator)]
-          (throw error))))))
+          (throw error)))))))
 
 (defn- allocate-flat
   "Allocate virtual MIR deterministically. No-call bodies spill only values
