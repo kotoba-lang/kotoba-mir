@@ -1645,7 +1645,15 @@
 (defn- allocate-with-policy
   "Try the linear scanner, including call-clobber handling. A function that
   still cannot complete falls back to the conservative all-vreg path. Returns
-  [allocated-program frame-policy]."
+  [allocated-program frame-policy].
+
+  Call plus a backward jump takes all-vreg by contract, not as a per-function
+  accident. `last-uses` is the highest instruction index at which a vreg is a
+  source. A terminating loop's induction variable is defined in the body
+  (later index) and used at the header phi (earlier index), so the scanner
+  cannot complete that shape while `:cfg-liveness` is false. Do not wait for
+  a call+loop the scanner can complete; there is not one among terminating
+  loops. Do not remove `back-edge?` until last-uses follow labels."
   [program]
   (validate-flat! program)
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)
