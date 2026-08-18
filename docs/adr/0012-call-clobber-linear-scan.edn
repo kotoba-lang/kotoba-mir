@@ -37,14 +37,13 @@
  ;; covers on its own. The neutralisation was proved live rather than assumed:
  ;; the overridden file was made unparseable and the build failed.
  ;;
- ;; The predicate is retained anyway, and that is a JUDGEMENT, not a
- ;; measurement. It sends call-containing functions with a backward jump to
- ;; all-vreg, so they never reach the scanner and do not get its frame
- ;; savings; removing it would realise that. But the evidence for removing it
- ;; is "a corpus we already know did not span this feature cannot tell the two
- ;; apart", which is the exact reasoning that let the original defect land
- ;; (ADR-2608136000, fourth form). Remove it against a corpus containing a
- ;; compiled function with both a call and a loop, not against this one.
+ ;; The call+loop corpus now exists (count-loop GMIR: call + backward jump,
+ ;; acc live across both). Executed on judah, n in {0,1,5,50} => n, both
+ ;; ISAs. Neutralising back-edge? is live and the policy stays [:all-vregs 8]
+ ;; -- the scanner spill-falls back. The predicate is still not load-bearing
+ ;; on a program that has a back edge. It stays because removing it would
+ ;; not change this function, and we still do not have a call+loop the
+ ;; scanner can complete.
  :defect-closed {:since "7f7c55691697ba25abf6d732870a159433ce1fab"
                  :code "ac14016d1cb07a9d0a4c1942452c6340814cbaae"
                  :reproducer "(defn main [] (if (string-contains? \"abcdef\" \"def\") 1 0))"
@@ -72,7 +71,13 @@
                                    :neutralisation-proved-live true
                                    :retained :judgement
                                    :cost "call+loop functions never reach the scanner"
-                                   :remove-only-with "a corpus containing a compiled function with a call and a loop"}}
+                                   :corpus-call-loop {:encoding-test :v3-call-plus-back-edge-is-routed-to-all-vregs
+                                                      :execution-test :a-call-and-a-back-edge-in-one-function-execute
+                                                      :oracle "n in #{0 1 5 50} => n, both ISAs"
+                                                      :policy [:all-vregs 8]
+                                                      :neutralised-policy [:all-vregs 8]
+                                                      :scanner :spill-fallback}
+                                   :remove-only-with "a call+loop the linear scanner can complete"}}
  :claims {:cfg-liveness false
           :spill-slot-coloring false
           :rust-performance-parity false
