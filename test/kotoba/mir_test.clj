@@ -547,7 +547,149 @@
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target)
       (is (= allocated (->> scalar-call-module
                             (mir/select-target target)
-                             mir/allocate-registers)) target))))
+                            mir/allocate-registers)) target))))
+
+(def call-branch-module
+  "The same caller as scalar-call-module, with one `if` around the add. Only
+  the allocation path differs: labels used to send the body to all-vreg."
+  {:gmir/version 3
+   :gmir/entry 'main
+   :gmir/functions
+   [{:gmir/name 'add-one
+     :gmir/arity 1
+     :gmir/instructions
+     [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+      {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 1}
+      {:gmir/op :gmir/add :gmir/dst v2 :gmir/left v0 :gmir/right v1}
+      {:gmir/op :gmir/return :gmir/value v2}]}
+    {:gmir/name 'main
+     :gmir/arity 1
+     :gmir/instructions
+     [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+      {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 10}
+      {:gmir/op :gmir/call :gmir/dst v2 :gmir/callee 'add-one
+       :gmir/arguments [v0]}
+      {:gmir/op :gmir/branch-zero :gmir/test v0 :gmir/target :test.label/else}
+      {:gmir/op :gmir/label :gmir/id :test.label/then}
+      {:gmir/op :gmir/add :gmir/dst v3 :gmir/left v2 :gmir/right v1}
+      {:gmir/op :gmir/label :gmir/id :test.label/then-exit}
+      {:gmir/op :gmir/jump :gmir/target :test.label/join}
+      {:gmir/op :gmir/label :gmir/id :test.label/else}
+      {:gmir/op :gmir/constant :gmir/dst v4 :gmir/value 0}
+      {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
+      {:gmir/op :gmir/jump :gmir/target :test.label/join}
+      {:gmir/op :gmir/label :gmir/id :test.label/join}
+      {:gmir/op :gmir/phi :gmir/dst v5
+       :gmir/incomings
+       [{:gmir/predecessor :test.label/then-exit :gmir/value v3}
+        {:gmir/predecessor :test.label/else-exit :gmir/value v4}]}
+      {:gmir/op :gmir/return :gmir/value v5}]}]})
+
+(defn- value-ops-unbacked-by-store
+  [instructions]
+  (let [value-ops #{:mir/argument :mir/constant :mir/add :mir/call
+                    :mir/runtime-call :mir/capability-call}]
+    (keep-indexed
+     (fn [index instruction]
+       (when (and (contains? value-ops (:mir/op instruction))
+                  (let [store (get instructions (inc index))]
+                    (not (and (= :mir/spill-store (:mir/op store))
+                              (= (:mir/dst instruction) (:mir/src store))))))
+         instruction))
+     instructions)))
+
+(deftest v3-call-with-control-flow-uses-the-linear-scanner
+  (doseq [target mir/targets]
+    (let [allocated (->> call-branch-module
+                         (mir/select-target target)
+                         mir/allocate-registers)
+          [callee caller] (:mir/functions allocated)
+          instructions (:mir/instructions caller)
+          call (first (filter #(= :mir/call (:mir/op %)) instructions))]
+      (is (= :allocator (:mir/frame-policy callee)) target)
+      (is (= :call-live (:mir/frame-policy caller)) target)
+      (is (< (:mir/frame-slots caller) 6) target)
+      (is (seq (value-ops-unbacked-by-store instructions))
+          (str target " must not take the all-vreg path (every value stored)"))
+      (is (= (get mir/return-registers target) (:mir/dst call)) target)
+      (is (= [(first (get mir/call-argument-registers target))]
+             (:mir/arguments call)) target)
+      (is (seq (mir/saved-registers target instructions))
+          (str target " keeps a live-across value in the preserved tier"))
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target)
+      (is (= allocated (->> call-branch-module
+                            (mir/select-target target)
+                            mir/allocate-registers)) target))))
+
+(defn- call-branch-wide-module
+  "WIDTH calls, all results live until a join. All-vreg would assign a slot
+  per SSA value; the linear scanner's slots are bounded by live-across
+  values that do not fit in the preserved tier."
+  [width]
+  (let [arg (gmir/vreg 0)
+        results (mapv gmir/vreg (range 1 (inc width)))
+        calls (mapv (fn [dst]
+                      {:gmir/op :gmir/call :gmir/dst dst :gmir/callee 'add-one
+                       :gmir/arguments [arg]})
+                    results)
+        [sum-insns sum-vreg]
+        (reduce (fn [[insns acc] result]
+                  (let [dst (gmir/vreg (+ 100 (count insns)))]
+                    [(conj insns {:gmir/op :gmir/add :gmir/dst dst
+                                  :gmir/left acc :gmir/right result})
+                     dst]))
+                [[] (first results)]
+                (rest results))
+        zero (gmir/vreg 200)
+        join (gmir/vreg 201)]
+    {:gmir/version 3
+     :gmir/entry 'main
+     :gmir/functions
+     [{:gmir/name 'add-one :gmir/arity 1
+       :gmir/instructions
+       [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+        {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 1}
+        {:gmir/op :gmir/add :gmir/dst v2 :gmir/left v0 :gmir/right v1}
+        {:gmir/op :gmir/return :gmir/value v2}]}
+      {:gmir/name 'main :gmir/arity 1
+       :gmir/instructions
+       (vec (concat
+             [{:gmir/op :gmir/argument :gmir/dst arg :gmir/index 0}]
+             calls
+             [{:gmir/op :gmir/branch-zero :gmir/test arg
+               :gmir/target :test.label/else}
+              {:gmir/op :gmir/label :gmir/id :test.label/then}]
+             sum-insns
+             [{:gmir/op :gmir/label :gmir/id :test.label/then-exit}
+              {:gmir/op :gmir/jump :gmir/target :test.label/join}
+              {:gmir/op :gmir/label :gmir/id :test.label/else}
+              {:gmir/op :gmir/constant :gmir/dst zero :gmir/value 0}
+              {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
+              {:gmir/op :gmir/jump :gmir/target :test.label/join}
+              {:gmir/op :gmir/label :gmir/id :test.label/join}
+              {:gmir/op :gmir/phi :gmir/dst join
+               :gmir/incomings
+               [{:gmir/predecessor :test.label/then-exit :gmir/value sum-vreg}
+                {:gmir/predecessor :test.label/else-exit :gmir/value zero}]}
+              {:gmir/op :gmir/return :gmir/value join}]))}]}))
+
+(deftest v3-eight-live-calls-with-a-join-do-not-take-all-vreg
+  (let [width 8
+        module (call-branch-wide-module width)]
+    (doseq [target mir/targets]
+      (let [caller (second (:mir/functions
+                            (->> module (mir/select-target target)
+                                 mir/allocate-registers)))
+            instructions (:mir/instructions caller)
+            preserved (count (get mir/preserved-registers target))]
+        (is (= :call-live (:mir/frame-policy caller)) target)
+        (is (<= (:mir/frame-slots caller) (inc (- width preserved)))
+            (str target " spills at most the live-across excess, not every value"))
+        (is (< (count (filter #(= :mir/spill-store (:mir/op %)) instructions))
+               (* 3 width))
+            (str target " is not storing every SSA value"))
+        (is (seq (value-ops-unbacked-by-store instructions)) target)
+        (is (not-any? gmir/vreg? (tree-seq coll? seq caller)) target)))))
 
 (deftest v3-tail-calls-release-the-current-frame-before-transfer
   (let [module (assoc-in scalar-call-module
