@@ -1,0 +1,16 @@
+{:adr/id 12
+ :adr/status :accepted
+ :decision :call-clobber-linear-scan
+ :supersedes {:adr/id 6 :scope :control-flow-all-vregs}
+ :contract {:mir/version 3
+            :straight-line-policy :call-live
+            :control-flow-policy :linear-scan-preserved-across-calls
+            :fallback-policy :all-vregs
+            :call-clobbers :caller-saved
+            :live-across-preference :preserved-tier
+            :spill-placement :at-definition}
+ :fallbacks #{:register-pressure}
+ :claims {:cfg-liveness false
+          :spill-slot-coloring false
+          :rust-performance-parity false
+          :llvm-beaten false}}
