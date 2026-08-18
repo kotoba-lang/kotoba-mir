@@ -181,7 +181,8 @@
                           {:gmir/op :gmir/return :gmir/value (registers 10)}]))}
           allocated (->> program (mir/select-target :x86-64)
                          mir/allocate-registers)]
-      (is (= 11 (:mir/frame-slots allocated)))
+      (is (= 2 (:mir/frame-slots allocated))
+          "six live f64 constants on four scratch registers spill two, not eleven")
       (is (some #(= :mir/f64-sqrt (:mir/op %)) (:mir/instructions allocated)))
       (is (some #(= :mir/f64-unordered (:mir/op %)) (:mir/instructions allocated)))
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))))))
@@ -260,7 +261,8 @@
                            :gmir/left (registers 9) :gmir/right (registers 8)}
                           {:gmir/op :gmir/return :gmir/value (registers 10)}]))}
           allocated (->> program (mir/select-target :x86-64) mir/allocate-registers)]
-      (is (= 11 (:mir/frame-slots allocated)))
+      (is (= 2 (:mir/frame-slots allocated))
+          "six live constants on four scratch registers spill two, not every vreg")
       (is (= allocated
              (->> program (mir/select-target :x86-64) mir/allocate-registers)))
       (is (some #(= :mir/spill-store (:mir/op %)) (:mir/instructions allocated)))
@@ -486,12 +488,19 @@
                   {:gmir/op :gmir/add :gmir/dst result :gmir/left join-value :gmir/right e}
                   {:gmir/op :gmir/return :gmir/value result}]}
           allocated (->> input (mir/select-target :x86-64) mir/allocate-registers)
-          instructions (:mir/instructions allocated)]
-      (is (= 10 (:mir/frame-slots allocated))
-          "the phi destination owns its ordinary spill slot; no extra merge slot exists")
-      (is (not-any? #(= :mir/move (:mir/op %)) instructions)
-          "the general spill path coalesces slots instead of introducing moves")
-      (is (not-any? #(= :mir/phi (:mir/op %)) (:mir/instructions allocated))))))
+          instructions (:mir/instructions allocated)
+          spill-slots (into #{} (keep :mir/slot
+                                     (filter #(contains? #{:mir/spill-store
+                                                           :mir/spill-load}
+                                                         (:mir/op %))
+                                             instructions)))]
+      (is (= 2 (:mir/frame-slots allocated))
+          "pressure spills two live constants; the join does not add a slot")
+      (is (= #{0 1} spill-slots)
+          "phi coalescing reuses edge moves instead of a third merge slot")
+      (is (some #(= :mir/move (:mir/op %)) instructions)
+          "the no-spill join still coalesces to a move")
+      (is (not-any? #(= :mir/phi (:mir/op %)) instructions)))))
 
 (def scalar-call-module
   {:gmir/version 3
@@ -1024,7 +1033,7 @@
                         {:gmir/op :gmir/return :gmir/value (registers 10)}]))}
         allocated (->> program (mir/select-target :x86-64) mir/allocate-registers)]
     ;; The same program the exhaustion test uses. Under the scratch tier alone
-    ;; it takes eleven stack slots; with the tiers on offer it takes none.
+    ;; it spills two values; with the tiers on offer it takes none.
     (is (zero? (:mir/frame-slots allocated)))
     (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load} (:mir/op %))
                   (:mir/instructions allocated)))
@@ -1110,3 +1119,58 @@
                         (->> program (mir/select-target target)
                              mir/allocate-registers))]
       (is (empty? (mir/saved-registers target instructions)) target))))
+
+(defn- simultaneous-live-sum
+  "N independent constants, all live, then a left-fold so the last definition
+  is the peak. One past the pool must spill; the pool itself must not."
+  [n]
+  (let [values (mapv gmir/vreg (range n))]
+    {:gmir/version 1
+     :gmir/instructions
+     (vec (concat
+           (map-indexed (fn [index value]
+                          {:gmir/op :gmir/constant :gmir/dst value
+                           :gmir/value index})
+                        values)
+           (second
+            (reduce (fn [[acc ops] value]
+                      (let [dst (gmir/vreg (+ n (count ops)))]
+                        [dst (conj ops {:gmir/op :gmir/add :gmir/dst dst
+                                        :gmir/left acc :gmir/right value})]))
+                    [(first values) []]
+                    (rest values)))
+           [{:gmir/op :gmir/return
+             :gmir/value (gmir/vreg (+ n (dec n) -1))}]))}))
+
+(deftest a-body-that-fits-the-pool-still-does-not-touch-the-stack
+  (doseq [target mir/targets]
+    (let [pool (count (mir/allocator-pool target {:leaf? true}))
+          allocated (->> (simultaneous-live-sum pool)
+                         (mir/select-target target)
+                         mir/allocate-registers)]
+      (is (zero? (:mir/frame-slots allocated)) target)
+      (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load} (:mir/op %))
+                    (:mir/instructions allocated))
+          target))))
+
+(deftest one-past-the-pool-spills-one-value-not-every-value
+  (doseq [target mir/targets]
+    (let [pool (count (mir/allocator-pool target {:leaf? true}))
+          n (inc pool)
+          allocated (->> (simultaneous-live-sum n)
+                         (mir/select-target target)
+                         mir/allocate-registers)
+          slots (:mir/frame-slots allocated)
+          stores (filterv #(= :mir/spill-store (:mir/op %))
+                          (:mir/instructions allocated))]
+      (is (pos? slots) target)
+      (is (< slots n) target)
+      (is (= 1 slots)
+          (str target " spills the one value that does not fit, not " n))
+      (is (= 1 (count (distinct (map :mir/slot stores)))) target)
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target)
+      (is (= allocated
+             (->> (simultaneous-live-sum n)
+                  (mir/select-target target)
+                  mir/allocate-registers))
+          target))))
