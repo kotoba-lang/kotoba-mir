@@ -1077,6 +1077,32 @@
           :mir/frame-slots frame-slots
           :mir/instructions (:out result)}))))))
 
+(defn- store-at-definition
+  "Splice the spill-store in immediately after VALUE was defined, rather than
+  leaving it where the register ran out.
+
+  This allocator walks one flat instruction list that contains labels and
+  branches, so the point of exhaustion can sit inside one arm of a branch while
+  the reload lands in the other. A store left there writes a slot on a path that
+  was not taken, and the other path reads whatever was in it. A definition
+  dominates every use of its value, because the program is in SSA form, so a
+  store placed there is executed before any reload of it can be reached.
+
+  Every definition position at or after the splice moves along by one."
+  [{:keys [out def-position] :as state} value register slot]
+  (let [position (or (get def-position value)
+                     (reject! :spill-required
+                              {:problem :no-definition-to-store-at :value value}))
+        store {:mir/op :mir/spill-store :mir/src register :mir/slot slot}]
+    (assoc state
+           :out (into (conj (subvec out 0 position) store) (subvec out position))
+           :def-position (reduce-kv (fn [positions other other-position]
+                                      (assoc positions other
+                                             (if (>= other-position position)
+                                               (inc other-position)
+                                               other-position)))
+                                    {} def-position))))
+
 (defn- allocate-without-spills
   "Linear-scan allocation. The pool grows on demand; when it is empty the
   live value with the furthest next use is stored, not every SSA value.
@@ -1101,14 +1127,15 @@
                                   (inc (:next-slot state)))]
                   (when (> next-slot 4095)
                     (reject! :spill-frame-too-large {:frame-slots next-slot}))
-                  (-> state
-                      (assoc-in [:backed value] slot)
-                      (assoc :next-slot next-slot)
-                      (update :out conj {:mir/op :mir/spill-store
-                                         :mir/src register
-                                         :mir/slot slot})
-                      (update :assigned dissoc value)
-                      (update :free conj register)))))
+                  ;; A value already in a slot needs no second store: it never
+                  ;; changes, so what was written the first time is still what
+                  ;; is there.
+                  (cond-> (-> state
+                              (assoc-in [:backed value] slot)
+                              (assoc :next-slot next-slot)
+                              (update :assigned dissoc value)
+                              (update :free conj register))
+                    (not existing) (store-at-definition value register slot)))))
             (take-register [state instruction protected]
               (let [from-free (first (:free state))]
                 (if from-free
@@ -1117,14 +1144,18 @@
                     (if from-reserve
                       [(assoc state :reserve (vec (rest (:reserve state))))
                        from-reserve]
-                      (if-let [victim (or (furthest-victim (:assigned state)
-                                                           indexes
-                                                           (:index state)
-                                                           protected)
-                                          (furthest-victim (:assigned state)
-                                                           indexes
-                                                           (:index state)
-                                                           #{}))]
+                      ;; No second pass with an empty PROTECTED set. Evicting
+                      ;; an operand of the instruction being allocated loses it:
+                      ;; the source was just loaded and nothing reloads it, and
+                      ;; the destination does not exist yet. Rejecting here
+                      ;; sends the function to the conservative all-vreg path,
+                      ;; which is slower and correct. Unreachable in both
+                      ;; suites today -- an instruction would need every
+                      ;; register held by its own operands.
+                      (if-let [victim (furthest-victim (:assigned state)
+                                                       indexes
+                                                       (:index state)
+                                                       protected)]
                         (let [register (get-in state [:assigned victim])
                               state (spill-assigned state victim instruction)]
                           [(assoc state :free (vec (rest (:free state))))
@@ -1135,7 +1166,11 @@
              reserve (:reserve entry)
              backed (:entry-spills entry)
              next-slot (:stable-slot-count entry)
-             out (:instructions entry), used-temp? (:used-temp? entry)]
+             out (:instructions entry), used-temp? (:used-temp? entry)
+             ;; Everything the entry plan assigned is in place by the end of its
+             ;; own instructions, so that is where a store of one of them goes.
+             def-position (zipmap (keys (:assigned entry))
+                                  (repeat (count (:instructions entry))))]
         (if-let [instruction (first remaining)]
           (let [srcs (distinct (filter gmir/vreg? (sources instruction)))
                 protected (set srcs)
@@ -1156,16 +1191,18 @@
                                                               :mir/slot slot}))))))
                                {:assigned assigned :free free :reserve reserve
                                 :backed backed :next-slot next-slot
-                                :out out :index index}
+                                :out out :index index
+                                :def-position def-position}
                                srcs)
                 assigned (:assigned loaded)
                 free (:free loaded)
                 reserve (:reserve loaded)
                 backed (:backed loaded)
                 next-slot (:next-slot loaded)
-                out (:out loaded)]
+                out (:out loaded)
+                def-position (:def-position loaded)]
             (let [dst (:mir/dst instruction)
-                  [assigned free reserve backed next-slot out]
+                  [assigned free reserve backed next-slot out def-position]
                   (if (gmir/vreg? dst)
                     (do
                       (when (contains? assigned dst)
@@ -1182,18 +1219,21 @@
                                                            (vec (rest free))
                                                            free)
                                 :reserve reserve :backed backed
-                                :next-slot next-slot :out out :index index}
+                                :next-slot next-slot :out out :index index
+                                :def-position def-position}
                                register]
                               (take-register {:assigned assigned :free free
                                               :reserve reserve :backed backed
+                                              :def-position def-position
                                               :next-slot next-slot :out out
                                               :index index}
                                              instruction
                                              protected))]
                         [(assoc (:assigned state) dst register)
                          (:free state) (:reserve state)
-                         (:backed state) (:next-slot state) (:out state)]))
-                    [assigned free reserve backed next-slot out])
+                         (:backed state) (:next-slot state) (:out state)
+                         (:def-position state)]))
+                    [assigned free reserve backed next-slot out def-position])
                   allocated (reduce-kv
                              (fn [result key value]
                                (assoc result key
@@ -1221,7 +1261,10 @@
               (recur (inc index) (next remaining)
                      (:assigned state) (vec (:free state)) reserve
                      backed next-slot
-                     (conj out allocated) used-temp?)))
+                     (conj out allocated) used-temp?
+                     (if (gmir/vreg? dst)
+                       (assoc def-position dst (inc (count out)))
+                       def-position))))
           (validate-flat!
            {:mir/version version
             :mir/target target

@@ -1174,3 +1174,76 @@
                   (mir/select-target target)
                   mir/allocate-registers))
           target))))
+
+;; ── proportional spilling ────────────────────────────────────────────────────
+
+(deftest a-spill-store-sits-at-the-definition-not-where-the-register-ran-out
+  ;; Four values are live across a branch, and the arms need registers the
+  ;; scratch tier does not have. The point where a register runs out is inside
+  ;; one arm; the reload is in the other. A store emitted where the eviction
+  ;; happens would write a slot on a path that was not taken, and the other arm
+  ;; would read whatever was there. A definition dominates every use of its
+  ;; value, so that is where the store belongs.
+  (with-scratch-tier-only
+    (let [[a b c d x1 x2 x3 then-y else-y join result] (map gmir/vreg (range 11))
+          program
+          {:gmir/version 2
+           :gmir/instructions
+           [{:gmir/op :gmir/constant :gmir/dst a :gmir/value 1}
+            {:gmir/op :gmir/constant :gmir/dst b :gmir/value 2}
+            {:gmir/op :gmir/constant :gmir/dst c :gmir/value 3}
+            {:gmir/op :gmir/constant :gmir/dst d :gmir/value 4}
+            ;; `a` dies here, leaving b, c and d live in a four-register tier.
+            {:gmir/op :gmir/branch-zero :gmir/test a :gmir/target :test.label/else}
+            {:gmir/op :gmir/label :gmir/id :test.label/then}
+            {:gmir/op :gmir/add :gmir/dst x1 :gmir/left c :gmir/right d}
+            ;; The fourth register is gone and neither operand of this dies, so
+            ;; something is evicted -- here, inside this arm. The victim is the
+            ;; value wanted furthest away, which is `b`, because its next use is
+            ;; in the arm that this one does not reach.
+            {:gmir/op :gmir/add :gmir/dst x2 :gmir/left c :gmir/right d}
+            {:gmir/op :gmir/add :gmir/dst x3 :gmir/left x1 :gmir/right x2}
+            {:gmir/op :gmir/add :gmir/dst then-y :gmir/left x3 :gmir/right d}
+            {:gmir/op :gmir/label :gmir/id :test.label/then-exit}
+            {:gmir/op :gmir/jump :gmir/target :test.label/join}
+            {:gmir/op :gmir/label :gmir/id :test.label/else}
+            ;; ...and this arm reads it.
+            {:gmir/op :gmir/add :gmir/dst else-y :gmir/left b :gmir/right c}
+            {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
+            {:gmir/op :gmir/jump :gmir/target :test.label/join}
+            {:gmir/op :gmir/label :gmir/id :test.label/join}
+            {:gmir/op :gmir/phi :gmir/dst join
+             :gmir/incomings [{:gmir/predecessor :test.label/then-exit :gmir/value then-y}
+                              {:gmir/predecessor :test.label/else-exit :gmir/value else-y}]}
+            {:gmir/op :gmir/add :gmir/dst result :gmir/left join :gmir/right d}
+            {:gmir/op :gmir/return :gmir/value result}]}
+          instructions (:mir/instructions
+                        (->> program (mir/select-target :x86-64)
+                             mir/allocate-registers))
+          numbered (vec (map-indexed vector instructions))
+          stores (filter (fn [[_ i]] (= :mir/spill-store (:mir/op i))) numbered)
+          loads (filter (fn [[_ i]] (= :mir/spill-load (:mir/op i))) numbered)
+          label-at (fn [position]
+                     (->> (subvec instructions 0 position)
+                          (filter #(= :mir/label (:mir/op %)))
+                          last :mir/id))]
+      (is (seq stores) "the program has to spill for the rest to mean anything")
+      (is (seq loads))
+      (doseq [[position store] stores]
+        (is (pos? position))
+        (is (= (:mir/src store) (:mir/dst (nth instructions (dec position))))
+            (str "the store at " position " must follow the instruction that "
+                 "defines the register it stores")))
+      ;; The property the placement exists for: nothing reloads a slot from a
+      ;; block other than the one that wrote it, unless the writer's block
+      ;; dominates -- and here the only dominating block is the entry.
+      (doseq [[position load] loads]
+        (let [slot (:mir/slot load)
+              writer (first (filter (fn [[_ store]] (= slot (:mir/slot store)))
+                                    stores))]
+          (is writer (str "slot " slot " is loaded at " position " and never stored"))
+          (when writer
+            (is (< (first writer) position) "stored before it is loaded")
+            (is (nil? (label-at (first writer)))
+                (str "slot " slot " is stored inside " (label-at (first writer))
+                     " and loaded inside " (label-at position)))))))))
