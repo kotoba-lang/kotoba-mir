@@ -75,6 +75,20 @@ search, so whatever loop `string-contains?` and `string-replace-all` lower to
 is not a backward jump this predicate sees. The rest of the fault is not yet
 located. Do not read the predicate as the fix.
 
+A second located hole, independent of a back edge: `last-uses` is still
+textual, so a reload on the then-arm keeps the value in `:assigned` for the
+else-arm, which never executed that load and then reads a leftover
+callee-saved register. Store-at-definition does not prevent this. At every
+label after the entry, backed values that are currently assigned are dropped
+so the next use in that block loads them again. Unbacked values stay: their
+definition dominates the split. This is not a rebuild of the free lists on
+every label -- that scramble broke phi coalescing on leaf bodies.
+
+Encoding test: `v3-else-arm-reloads-a-value-the-then-arm-already-reloaded`.
+That is the same class of evidence this repository already had, and it is
+not an amu execution. Do not advance amu until `string-contains?` is
+measured there.
+
 Shapes measured correct, so the defect is narrower than "calls plus control
 flow": a call with ten values live across it read in a branch arm; two calls
 with the first result live across the second; a call result used directly as

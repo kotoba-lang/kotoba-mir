@@ -855,6 +855,17 @@
     {:free (vec (remove owned (take scratch-count pool)))
      :reserve (vec (remove owned (drop scratch-count pool)))}))
 
+(defn- drop-backed-assignments
+  "A reload in one arm does not satisfy a use in another. Values that already
+  have a slot are dropped from the assignment at every label so the next use
+  in this block loads them again. Values that were never spilled stay: their
+  definition dominates the split. Callers skip this when nothing assigned is
+  backed -- rebuilding the pool lists on a leaf scramble coalescing."
+  [target pool assigned backed]
+  (let [kept (into {} (remove (fn [[value _]] (contains? backed value)) assigned))
+        lists (rebuild-pool-lists target pool kept)]
+    {:assigned kept :free (:free lists) :reserve (:reserve lists)}))
+
 (defn- physicalize-call
   [target instruction call-registers return-register]
   (let [op (:mir/op instruction)]
@@ -1138,8 +1149,11 @@
   preserved tier at their definition so a call does not have to move them.
   Remaining live caller-saved values are stored at their definition -- the
   store dominates every reload, including the arm that does not contain the
-  call -- then dropped from the assignment. The call itself uses the ABI
-  registers. Pressure that still cannot complete falls out as :spill-required."
+  call -- then dropped from the assignment. A reload in one arm does not
+  satisfy a use in another: at every label after the entry, backed values
+  that are currently assigned leave the assignment so the next use in that
+  block loads them again. The call itself uses the ABI registers. Pressure
+  that still cannot complete falls out as :spill-required."
   [{:mir/keys [version target registers instructions] :as program} merge-slots]
   (when-not (= :virtual registers)
     (reject! :registers-not-virtual program))
@@ -1306,7 +1320,16 @@
                      (:backed state) (:next-slot state)
                      (:out state) (:used-temp? state) (:temp-slot state)
                      (:def-position state)))
-            (let [srcs (distinct (filter gmir/vreg? (sources instruction)))
+            (let [drop? (and (= :mir/label (:mir/op instruction))
+                             (pos? index)
+                             (some #(contains? backed %) (keys assigned)))
+                  block (if drop?
+                          (drop-backed-assignments target pool assigned backed)
+                          {:assigned assigned :free free :reserve reserve})
+                  assigned (:assigned block)
+                  free (:free block)
+                  reserve (:reserve block)
+                  srcs (distinct (filter gmir/vreg? (sources instruction)))
                   protected (set srcs)
                   loaded (reduce (fn [state source]
                                    (if (contains? (:assigned state) source)

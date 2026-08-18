@@ -621,6 +621,67 @@
                             (mir/select-target target)
                             mir/allocate-registers)) target))))
 
+(defn- instructions-in-block
+  "Body of LABEL, stopping at the next label or jump."
+  [instructions label-id]
+  (->> instructions
+       (drop-while #(not (and (= :mir/label (:mir/op %))
+                              (= label-id (:mir/id %)))))
+       next
+       (take-while #(not (contains? #{:mir/label :mir/jump} (:mir/op %))))
+       vec))
+
+(def count-down-reload-module
+  "Call, then `if`: then-arm returns acc, else-arm adds to acc. A reload of
+  acc on the then path must not satisfy the else path."
+  {:gmir/version 3
+   :gmir/entry 'count-down
+   :gmir/functions
+   [{:gmir/name 'id :gmir/arity 1
+     :gmir/instructions
+     [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+      {:gmir/op :gmir/return :gmir/value v0}]}
+    {:gmir/name 'count-down :gmir/arity 2
+     :gmir/instructions
+     [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+      {:gmir/op :gmir/argument :gmir/dst v1 :gmir/index 1}
+      {:gmir/op :gmir/call :gmir/dst v2 :gmir/callee 'id
+       :gmir/arguments [v0]}
+      {:gmir/op :gmir/branch-zero :gmir/test v0 :gmir/target :test.label/else}
+      {:gmir/op :gmir/label :gmir/id :test.label/then}
+      {:gmir/op :gmir/label :gmir/id :test.label/then-exit}
+      {:gmir/op :gmir/jump :gmir/target :test.label/join}
+      {:gmir/op :gmir/label :gmir/id :test.label/else}
+      {:gmir/op :gmir/constant :gmir/dst v3 :gmir/value 1}
+      {:gmir/op :gmir/add :gmir/dst v4 :gmir/left v1 :gmir/right v3}
+      {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
+      {:gmir/op :gmir/jump :gmir/target :test.label/join}
+      {:gmir/op :gmir/label :gmir/id :test.label/join}
+      {:gmir/op :gmir/phi :gmir/dst v5
+       :gmir/incomings
+       [{:gmir/predecessor :test.label/then-exit :gmir/value v1}
+        {:gmir/predecessor :test.label/else-exit :gmir/value v4}]}
+      {:gmir/op :gmir/return :gmir/value v5}]}]})
+
+(deftest v3-else-arm-reloads-a-value-the-then-arm-already-reloaded
+  (doseq [target mir/targets]
+    (let [allocated (->> count-down-reload-module
+                         (mir/select-target target)
+                         mir/allocate-registers)
+          caller (second (:mir/functions allocated))
+          instructions (:mir/instructions caller)
+          else (instructions-in-block instructions :test.label/else)
+          add (first (filter #(= :mir/add (:mir/op %)) else))]
+      (is (= :call-live (:mir/frame-policy caller)) target)
+      (is (some? add) target)
+      (is (some #(and (= :mir/spill-load (:mir/op %))
+                      (= (:mir/dst %) (:mir/left add)))
+                else)
+          (str target " else arm reloads acc; a then-arm reload does not keep it assigned"))
+      (is (seq (value-ops-unbacked-by-store instructions))
+          (str target " must not fall back to all-vreg"))
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target))))
+
 (defn- call-branch-wide-module
   "WIDTH calls, all results live until a join. All-vreg would assign a slot
   per SSA value; the linear scanner's slots are bounded by live-across
