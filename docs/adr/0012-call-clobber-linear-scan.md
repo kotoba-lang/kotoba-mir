@@ -2,31 +2,28 @@
 
 ## Status
 
-Accepted, and **defective as implemented**. Do not advance amu onto this pin.
+Accepted. The 2026-08-18 miscompile is **closed by execution**, not by
+encodings.
 
-Measured 2026-08-18 through amu, which executes native code:
+Measured through amu, which runs compiled native code:
 
-| kotoba-mir | amu suite |
+| kotoba-mir | what amu saw |
 |---|---|
-| `8872a54` (before) | 1094 tests, 0 failures |
-| `7f7c556` (this) | 1096 tests, **62 failures** |
+| `8872a54` (before this ADR) | 1094 tests, 0 failures |
+| `7f7c556` (scanner takes calls + CFG) | 1096 tests, **62 failures** |
+| `7f7c556` + `back-edge?` | 61 failures |
+| `ac14016d` (`back-edge?` + drop-backed-at-label) | **native-executor-test + isa-execution-test: 74 tests, 841 assertions, 0 failures** on judah, amu `30370f07` |
 
-60 of them are string search, split **30 AArch64 / 30 x86-64**. An even split
-across two independent encoders puts the fault in the shared allocator.
+The 62 failures were string search (30 AArch64 / 30 x86-64) plus
+`let-composes-with-recursion-within-the-fuel-budget`. The one-line
+reproducer `(defn main [] (if (string-contains? "abcdef" "def") 1 0))`
+returned 0 at `7f7c556` and 1 at `ac14016d`.
 
-```
-(defn main [] (if (string-contains? "abcdef" "def") 1 0))   ; => 0, expected 1
-```
-
-`string-replace-all` returns wrong content and wrong byte lengths, and one
-multi-byte case traps. Cases expecting "absent" largely still pass, so the
-search loop fails to *find* rather than failing outright.
-
-Neither this repository's suite nor kotoba-native's can report any of it.
-Both inspect encodings, frame policy and slot counts; neither runs a compiled
-program, so no result either can produce distinguishes this implementation
-from a correct one. The Consequences section below anticipated exactly this
-and it still happened.
+This repository's suite and kotoba-native's still do not run a compiled
+program. Their green is not this measurement. `:cfg-liveness` remains
+false: a call-containing function with a backward jump still takes
+all-vreg. That conservative floor is not a ranking, and it is not a claim
+that LLVM is beaten.
 
 ## Context
 
@@ -58,45 +55,37 @@ into all-vreg.
 Physical functions produced this way declare `:call-live`. `:all-vregs`
 remains the fallback.
 
-`back-edge?` (added 2026-08-18) sends a call-containing function with a
-backward `:mir/jump` or `:mir/branch-zero` to `:all-vregs` before the scanner
-sees it. `last-uses` records only the highest instruction *index* at which a
-vreg is a source -- it reads no label and no branch target -- so a value's
-interval ends at its textually last use. That is sound while the scanner only
-sees straight-line functions, where textual order is execution order; a back
-edge re-reads a value after its register has been given away. This is the
-`:cfg-liveness false` claim below, stated as a defect rather than as a
-limitation.
+`last-uses` records only the highest instruction *index* at which a vreg is
+a source. It reads no label and no branch target. Two holes followed from
+routing control flow through that:
 
-**It is necessary and not sufficient, measured rather than assumed: 62
-failures become 61.** It fixes
-`let-composes-with-recursion-within-the-fuel-budget` and does not touch string
-search, so whatever loop `string-contains?` and `string-replace-all` lower to
-is not a backward jump this predicate sees. The rest of the fault is not yet
-located. Do not read the predicate as the fix.
-
-A second located hole, independent of a back edge: `last-uses` is still
-textual, so a reload on the then-arm keeps the value in `:assigned` for the
-else-arm, which never executed that load and then reads a leftover
-callee-saved register. Store-at-definition does not prevent this. At every
-label after the entry, backed values that are currently assigned are dropped
-so the next use in that block loads them again. Unbacked values stay: their
-definition dominates the split. This is not a rebuild of the free lists on
-every label -- that scramble broke phi coalescing on leaf bodies.
+1. A **back edge** re-reads a value after its textual interval ended.
+   `back-edge?` sends a call-containing function with a backward
+   `:mir/jump` or `:mir/branch-zero` to all-vreg. Measured: 62 failures
+   became 61. It fixes `let-composes-with-recursion` and does not see
+   string search.
+2. A **then-arm reload** keeps the value in `:assigned` for the else arm,
+   which never executed that load and then reads leftover callee-saved
+   garbage (`x20`). Store-at-definition does not prevent this. At every
+   label after the entry, backed values that are currently assigned are
+   dropped so the next use in that block loads them again. Unbacked values
+   stay. Rebuilding the free lists on every label, including leaves with
+   nothing backed, scrambled phi coalescing; the drop runs only when
+   something assigned is backed.
 
 Encoding test: `v3-else-arm-reloads-a-value-the-then-arm-already-reloaded`.
-That is the same class of evidence this repository already had, and it is
-not an amu execution. Do not advance amu until `string-contains?` is
-measured there.
-
-Shapes measured correct, so the defect is narrower than "calls plus control
-flow": a call with ten values live across it read in a branch arm; two calls
-with the first result live across the second; a call result used directly as
-a branch condition; `kernel_call_branch` and `kernel_call_deep_branch`.
+Execution: amu `native-executor-test` and `isa-execution-test` on judah
+against native `e8642e0` / mir `ac14016d`.
 
 ## Consequences
 
 A caller with one call and one `if` no longer stores every SSA value. Live
 across values that fit in the preserved tier do not occupy a slot. Tests
-must execute the call ABI, not only count encodings: a hasty proportional
-spill at the call site already produced silent wrong code on a branch.
+that only count encodings cannot distinguish this implementation from a
+wrong one — that is how `7f7c556` shipped. The namespaces that execute
+compiled programs are the gate for the next pin, not this repository's
+suite.
+
+`:cfg-liveness` is still false. Loops with calls still take all-vreg.
+Straight-line ADR 0006 still stores every live-across value. Neither is
+withdrawn by closing the miscompile.

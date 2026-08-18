@@ -1,5 +1,5 @@
 {:adr/id 12
- :adr/status :accepted-defective
+ :adr/status :accepted
  :decision :call-clobber-linear-scan
  :supersedes {:adr/id 6 :scope :control-flow-all-vregs}
  :contract {:mir/version 3
@@ -9,67 +9,41 @@
             :call-clobbers :caller-saved
             :live-across-preference :preserved-tier
             :spill-placement :at-definition
-            :reload-at-block-entry :backed-values}
- ;; Measured 2026-08-18 through amu, which executes native code. This
- ;; implementation returns wrong answers. The decision is not withdrawn; the
- ;; implementation is not safe to consume.
+            :reload-at-block-entry :backed-values
+            :back-edge :all-vregs}
+ :fallbacks #{:register-pressure :back-edge}
+ ;; Miscompile at 7f7c556 (62 amu failures) closed by execution, not by
+ ;; encodings. Code that executed green is ac14016d; this commit records it.
  ;;
- ;;   amu on 8872a54 (before this ADR): 1094 tests, 0 failures
- ;;   amu on 7f7c556 (this ADR):        1096 tests, 62 failures
+ ;;   8872a54 (before):           1094 tests, 0 failures
+ ;;   7f7c556:                    1096 tests, 62 failures
+ ;;   7f7c556 + back-edge?:       61 failures
+ ;;   ac14016d on judah, amu 30370f07:
+ ;;     native-executor-test + isa-execution-test
+ ;;     74 tests, 841 assertions, 0 failures
+ ;;     string-contains? one-liner returns 1
  ;;
- ;; 60 of them are string search, split 30 AArch64 / 30 x86-64. An even split
- ;; across two independent encoders puts the fault in this shared allocator.
- ;;
- ;;   (defn main [] (if (string-contains? "abcdef" "def") 1 0))  => 0
- ;;
- ;; `string-replace-all` returns wrong content and wrong byte lengths, and one
- ;; multi-byte case traps. Cases expecting "absent" largely still pass, so the
- ;; search loop fails to FIND rather than failing outright.
- ;;
- ;; Partial cause, confirmed. `last-uses` records the highest instruction INDEX
- ;; at which a vreg is a source; it reads no label and no branch target. That
- ;; was sound while this scanner only saw straight-line functions, where
- ;; textual order is execution order. Routing control flow to it lets a back
- ;; edge re-read a value whose interval has ended.
- ;;
- ;; `back-edge?` now sends call-containing functions with a backward
- ;; `:mir/jump` or `:mir/branch-zero` to all-vreg. That is necessary and NOT
- ;; sufficient, measured rather than assumed:
- ;;
- ;;   without it: 62 failures   with it: 61 failures
- ;;
- ;; It fixes `let-composes-with-recursion-within-the-fuel-budget` and does not
- ;; touch string search at all -- so whatever loop `string-contains?` and
- ;; `string-replace-all` lower to is not a backward jump this predicate sees,
- ;; and the remaining fault is not yet located. Do not read the predicate as
- ;; the fix.
- ;;
- ;; Shapes that are correct, so the defect is narrower than "calls plus
- ;; control flow": call + `if` with 10 values live across the call; two calls
- ;; with the first result live across the second; a call result used directly
- ;; as a branch condition; kernel_call_branch and kernel_call_deep_branch.
- :defect {:since "7f7c55691697ba25abf6d732870a159433ce1fab"
-          :reproducer "(defn main [] (if (string-contains? \"abcdef\" \"def\") 1 0))"
-          :expected 1
-          :actual 0
-          :downstream "amu: 62 failures (60 string search, 30 per ISA)"
-          :also #{:string-replace-all-wrong-content
-                  :string-replace-all-wrong-byte-length
-                  :multi-byte-case-traps}
-          :partial-cause #{:textual-last-use-across-a-back-edge
+ ;; kotoba-mir and kotoba-native suites still do not execute compiled
+ ;; programs. Their green is not this measurement.
+ :defect-closed {:since "7f7c55691697ba25abf6d732870a159433ce1fab"
+                 :code "ac14016d1cb07a9d0a4c1942452c6340814cbaae"
+                 :reproducer "(defn main [] (if (string-contains? \"abcdef\" \"def\") 1 0))"
+                 :expected 1
+                 :was 0
+                 :causes #{:textual-last-use-across-a-back-edge
                            :reload-in-one-arm-keeps-assigned-for-the-other}
-          :partial-fix {:predicate :back-edge?
-                        :fixes #{:let-composes-with-recursion-within-the-fuel-budget}
-                        :does-not-fix #{:string-contains? :string-replace-all}
-                        :measured "62 failures -> 61"}
-          :partial-fix-2 {:drop-backed-at-label true
-                          :encoding-test :v3-else-arm-reloads-a-value-the-then-arm-already-reloaded
-                          :amu-measured false}
-          :not-yet-located "string search loop still unmeasured after sibling-arm reload drop"
-          :invisible-to #{"kotoba-mir suite" "kotoba-native suite"}
-          :why-invisible "neither repository executes a compiled program"
-          :do-not "advance amu onto this pin until string-contains? is measured green"}
- :fallbacks #{:register-pressure}
+                 :fixes {:back-edge? {:measured "62 failures -> 61"
+                                      :fixes #{:let-composes-with-recursion-within-the-fuel-budget}}
+                         :drop-backed-at-label {:encoding-test :v3-else-arm-reloads-a-value-the-then-arm-already-reloaded
+                                                :closes #{:string-contains? :string-replace-all
+                                                          :let-composes-with-recursion-within-the-fuel-budget}}}
+                 :amu {:pin "30370f077c86de9cd47da2aaa3fc14bf0ea7e6e3"
+                       :native "e8642e0c483b9f708a1680abd692ea3ff08422e5"
+                       :host "judah"
+                       :namespaces #{:native-executor-test :isa-execution-test}
+                       :tests 74
+                       :assertions 841
+                       :failures 0}}
  :claims {:cfg-liveness false
           :spill-slot-coloring false
           :rust-performance-parity false
