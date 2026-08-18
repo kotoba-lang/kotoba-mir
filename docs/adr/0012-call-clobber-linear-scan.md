@@ -25,6 +25,28 @@ false: a call-containing function with a backward jump still takes
 all-vreg. That conservative floor is not a ranking, and it is not a claim
 that LLVM is beaten.
 
+### The whole suite, and whether `back-edge?` is load-bearing
+
+The measurement above covers the two executing namespaces. On the full suite,
+amu `30370f07` is **1096 tests / 8235 assertions / 0 failures across 138 of 138
+namespaces**.
+
+**`back-edge?` is not load-bearing for that.** Re-running with the predicate
+neutralised gives an identical suite — 1096 / 8235 / 0 — including
+`let-composes-with-recursion-within-the-fuel-budget`, the one failure the
+predicate had fixed. `drop-backed-at-label` carries every shape amu covers on
+its own. The neutralisation was proved live rather than assumed: the overridden
+file was made unparseable and the build failed.
+
+The predicate is retained anyway, and that is a **judgement, not a
+measurement**. It sends call-containing functions with a backward jump to
+all-vreg, so they never reach the scanner and do not get its frame savings;
+removing it would realise that. But the evidence for removing it is "a corpus
+we already know did not span this feature cannot tell the two apart" — the
+exact reasoning that let the original defect land (ADR-2608136000, fourth
+form). Remove it against a corpus containing a compiled function with both a
+call and a loop, not against this one.
+
 ## Context
 
 ADR 0006 materializes only values live across a straight-line call. ADR 0011

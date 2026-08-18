@@ -25,6 +25,26 @@
  ;;
  ;; kotoba-mir and kotoba-native suites still do not execute compiled
  ;; programs. Their green is not this measurement.
+ ;;
+ ;; Confirmed on the whole suite, not only the two executing namespaces:
+ ;; amu 30370f07 is 1096 tests / 8235 assertions / 0 failures across 138 of
+ ;; 138 namespaces.
+ ;;
+ ;; `back-edge?` is NOT load-bearing for that result. Re-run with the
+ ;; predicate neutralised, the suite is identical -- 1096 / 8235 / 0 --
+ ;; including `let-composes-with-recursion-within-the-fuel-budget`, the one
+ ;; failure it had fixed. So `drop-backed-at-label` carries every shape amu
+ ;; covers on its own. The neutralisation was proved live rather than assumed:
+ ;; the overridden file was made unparseable and the build failed.
+ ;;
+ ;; The predicate is retained anyway, and that is a JUDGEMENT, not a
+ ;; measurement. It sends call-containing functions with a backward jump to
+ ;; all-vreg, so they never reach the scanner and do not get its frame
+ ;; savings; removing it would realise that. But the evidence for removing it
+ ;; is "a corpus we already know did not span this feature cannot tell the two
+ ;; apart", which is the exact reasoning that let the original defect land
+ ;; (ADR-2608136000, fourth form). Remove it against a corpus containing a
+ ;; compiled function with both a call and a loop, not against this one.
  :defect-closed {:since "7f7c55691697ba25abf6d732870a159433ce1fab"
                  :code "ac14016d1cb07a9d0a4c1942452c6340814cbaae"
                  :reproducer "(defn main [] (if (string-contains? \"abcdef\" \"def\") 1 0))"
@@ -43,7 +63,16 @@
                        :namespaces #{:native-executor-test :isa-execution-test}
                        :tests 74
                        :assertions 841
-                       :failures 0}}
+                       :failures 0}
+                 :amu-full-suite {:pin "30370f077c86de9cd47da2aaa3fc14bf0ea7e6e3"
+                                  :tests 1096 :assertions 8235
+                                  :namespaces "138/138" :failures 0}
+                 :back-edge-guard {:load-bearing false
+                                   :measured "suite identical with the predicate neutralised"
+                                   :neutralisation-proved-live true
+                                   :retained :judgement
+                                   :cost "call+loop functions never reach the scanner"
+                                   :remove-only-with "a corpus containing a compiled function with a call and a loop"}}
  :claims {:cfg-liveness false
           :spill-slot-coloring false
           :rust-performance-parity false
