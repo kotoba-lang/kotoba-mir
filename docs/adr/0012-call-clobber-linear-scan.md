@@ -47,6 +47,15 @@ exact reasoning that let the original defect land (ADR-2608136000, fourth
 form). Remove it against a corpus containing a compiled function with both a
 call and a loop, not against this one.
 
+That corpus now exists: `v3-call-plus-back-edge-is-routed-to-all-vregs` and
+amu `a-call-and-a-back-edge-in-one-function-execute` (n in {0,1,5,50} equals
+n, both ISAs). Neutralising `back-edge?` was proved live (the override
+ran) and the policy stayed `[:all-vregs 8]`: the linear scanner
+spill-falls back on this loop. The predicate is still not load-bearing on
+a program that actually has a back edge. It stays because removing it
+would not change this function, and we still do not have a call+loop the
+scanner can complete. `:cfg-liveness` remains false.
+
 ## Context
 
 ADR 0006 materializes only values live across a straight-line call. ADR 0011

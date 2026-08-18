@@ -1450,3 +1450,78 @@
             (is (nil? (label-at (first writer)))
                 (str "slot " slot " is stored inside " (label-at (first writer))
                      " and loaded inside " (label-at position)))))))))
+
+(defn- has-back-edge?
+  "True when a jump or branch targets a label at or before it. Same scan as
+  kotoba.mir/back-edge?, kept here because that predicate is private."
+  [instructions]
+  (let [label-index (into {}
+                          (keep-indexed
+                           (fn [index instruction]
+                             (when (= :mir/label (:mir/op instruction))
+                               [(:mir/id instruction) index]))
+                           instructions))]
+    (boolean
+     (some (fn [[index instruction]]
+             (and (contains? #{:mir/jump :mir/branch-zero} (:mir/op instruction))
+                  (when-let [target (get label-index (:mir/target instruction))]
+                    (<= target index))))
+           (map-indexed vector instructions)))))
+
+(def call-and-back-edge-module
+  "A function that contains a direct call and a backward jump, with `acc` and
+  `n` live across both. Kotoba `loop/recur` desugars to a recursive helper
+  (frontend-destructuring-loop-test), and string-search loops live in the
+  runtime, so this shape is not in the source corpus that iteration 21 ran."
+  (let [n0 (gmir/vreg 0)
+        acc0 (gmir/vreg 1)
+        n (gmir/vreg 2)
+        acc (gmir/vreg 3)
+        one (gmir/vreg 4)
+        stepped (gmir/vreg 5)
+        acc1 (gmir/vreg 6)
+        n1 (gmir/vreg 7)]
+    {:gmir/version 3
+     :gmir/entry 'count-loop
+     :gmir/functions
+     [{:gmir/name 'id :gmir/arity 1
+       :gmir/instructions
+       [{:gmir/op :gmir/argument :gmir/dst (gmir/vreg 0) :gmir/index 0}
+        {:gmir/op :gmir/return :gmir/value (gmir/vreg 0)}]}
+      {:gmir/name 'count-loop :gmir/arity 1
+       :gmir/instructions
+       [{:gmir/op :gmir/label :gmir/id :test.label/preheader}
+        {:gmir/op :gmir/argument :gmir/dst n0 :gmir/index 0}
+        {:gmir/op :gmir/constant :gmir/dst acc0 :gmir/value 0}
+        {:gmir/op :gmir/jump :gmir/target :test.label/header}
+        {:gmir/op :gmir/label :gmir/id :test.label/header}
+        {:gmir/op :gmir/phi :gmir/dst n
+         :gmir/incomings [{:gmir/predecessor :test.label/preheader :gmir/value n0}
+                          {:gmir/predecessor :test.label/latch :gmir/value n1}]}
+        {:gmir/op :gmir/phi :gmir/dst acc
+         :gmir/incomings [{:gmir/predecessor :test.label/preheader :gmir/value acc0}
+                          {:gmir/predecessor :test.label/latch :gmir/value acc1}]}
+        {:gmir/op :gmir/branch-zero :gmir/test n :gmir/target :test.label/done}
+        {:gmir/op :gmir/label :gmir/id :test.label/body}
+        {:gmir/op :gmir/constant :gmir/dst one :gmir/value 1}
+        {:gmir/op :gmir/call :gmir/dst stepped :gmir/callee 'id
+         :gmir/arguments [one]}
+        {:gmir/op :gmir/add :gmir/dst acc1 :gmir/left acc :gmir/right stepped}
+        {:gmir/op :gmir/subtract :gmir/dst n1 :gmir/left n :gmir/right one}
+        {:gmir/op :gmir/label :gmir/id :test.label/latch}
+        {:gmir/op :gmir/jump :gmir/target :test.label/header}
+        {:gmir/op :gmir/label :gmir/id :test.label/done}
+        {:gmir/op :gmir/return :gmir/value acc}]}]}))
+
+(deftest v3-call-plus-back-edge-is-routed-to-all-vregs
+  (doseq [target mir/targets]
+    (let [allocated (->> call-and-back-edge-module
+                         (mir/select-target target)
+                         mir/allocate-registers)
+          looper (->> allocated :mir/functions
+                      (filter #(= 'count-loop (:mir/name %)))
+                      first)
+          instructions (:mir/instructions looper)]
+      (is (has-back-edge? instructions) target)
+      (is (= :all-vregs (:mir/frame-policy looper)) target)
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target))))
