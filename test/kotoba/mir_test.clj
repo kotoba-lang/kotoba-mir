@@ -1,7 +1,18 @@
 (ns kotoba.mir-test
   (:require [clojure.test :refer [deftest is testing]]
             [kotoba.gmir :as gmir]
+            [clojure.set]
             [kotoba.mir :as mir]))
+
+(defmacro with-scratch-tier-only
+  "Run BODY with only the always-available scratch tier on offer. Tests that
+  are about what happens when the profile is exhausted have to be able to
+  exhaust it; otherwise widening the pool turns them into tests of nothing
+  that keep passing under their original names."
+  [& body]
+  `(with-redefs [mir/leaf-registers {:x86-64 [] :aarch64 []}
+                 mir/preserved-registers {:x86-64 [] :aarch64 []}]
+     ~@body))
 
 (def v0 (gmir/vreg 0))
 (def v1 (gmir/vreg 1))
@@ -148,31 +159,32 @@
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))))))
 
 (deftest f64-allocation-spills-binary-and-unary-values
-  (let [registers (mapv gmir/vreg (range 11))
-        program {:gmir/version 1
-                 :gmir/instructions
-                 (vec (concat
-                       (map-indexed (fn [index register]
-                                      {:gmir/op :gmir/constant :gmir/dst register
-                                       :gmir/value (+ 4607182418800017408 index)})
-                                    (subvec registers 0 6))
-                       [{:gmir/op :gmir/f64-add :gmir/dst (registers 6)
-                         :gmir/left (registers 0) :gmir/right (registers 1)}
-                        {:gmir/op :gmir/f64-multiply :gmir/dst (registers 7)
-                         :gmir/left (registers 2) :gmir/right (registers 3)}
-                        {:gmir/op :gmir/f64-unordered :gmir/dst (registers 8)
-                         :gmir/left (registers 4) :gmir/right (registers 5)}
-                        {:gmir/op :gmir/f64-add :gmir/dst (registers 9)
-                         :gmir/left (registers 6) :gmir/right (registers 7)}
-                        {:gmir/op :gmir/f64-sqrt :gmir/dst (registers 10)
-                         :gmir/input (registers 9)}
-                        {:gmir/op :gmir/return :gmir/value (registers 10)}]))}
-        allocated (->> program (mir/select-target :x86-64)
-                       mir/allocate-registers)]
-    (is (= 11 (:mir/frame-slots allocated)))
-    (is (some #(= :mir/f64-sqrt (:mir/op %)) (:mir/instructions allocated)))
-    (is (some #(= :mir/f64-unordered (:mir/op %)) (:mir/instructions allocated)))
-    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
+  (with-scratch-tier-only
+    (let [registers (mapv gmir/vreg (range 11))
+          program {:gmir/version 1
+                   :gmir/instructions
+                   (vec (concat
+                         (map-indexed (fn [index register]
+                                        {:gmir/op :gmir/constant :gmir/dst register
+                                         :gmir/value (+ 4607182418800017408 index)})
+                                      (subvec registers 0 6))
+                         [{:gmir/op :gmir/f64-add :gmir/dst (registers 6)
+                           :gmir/left (registers 0) :gmir/right (registers 1)}
+                          {:gmir/op :gmir/f64-multiply :gmir/dst (registers 7)
+                           :gmir/left (registers 2) :gmir/right (registers 3)}
+                          {:gmir/op :gmir/f64-unordered :gmir/dst (registers 8)
+                           :gmir/left (registers 4) :gmir/right (registers 5)}
+                          {:gmir/op :gmir/f64-add :gmir/dst (registers 9)
+                           :gmir/left (registers 6) :gmir/right (registers 7)}
+                          {:gmir/op :gmir/f64-sqrt :gmir/dst (registers 10)
+                           :gmir/input (registers 9)}
+                          {:gmir/op :gmir/return :gmir/value (registers 10)}]))}
+          allocated (->> program (mir/select-target :x86-64)
+                         mir/allocate-registers)]
+      (is (= 11 (:mir/frame-slots allocated)))
+      (is (some #(= :mir/f64-sqrt (:mir/op %)) (:mir/instructions allocated)))
+      (is (some #(= :mir/f64-unordered (:mir/op %)) (:mir/instructions allocated)))
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))))))
 
 (deftest selection-and-allocation-cover-bounded-kernel-memory
   (let [prefix [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
@@ -227,32 +239,33 @@
                           (mir/select-target :aarch64 program)))))
 
 (deftest allocation-spills-deterministically-when-the-scratch-profile-is-exhausted
-  (let [registers (mapv gmir/vreg (range 11))
-        program {:gmir/version 1
-                 :gmir/instructions
-                 (vec (concat
-                       (map-indexed (fn [index register]
-                                      {:gmir/op :gmir/constant :gmir/dst register
-                                       :gmir/value index})
-                                    (subvec registers 0 6))
-                       [{:gmir/op :gmir/add :gmir/dst (registers 6)
-                         :gmir/left (registers 0) :gmir/right (registers 1)}
-                        {:gmir/op :gmir/add :gmir/dst (registers 7)
-                         :gmir/left (registers 2) :gmir/right (registers 3)}
-                        {:gmir/op :gmir/add :gmir/dst (registers 8)
-                         :gmir/left (registers 4) :gmir/right (registers 5)}
-                        {:gmir/op :gmir/add :gmir/dst (registers 9)
-                         :gmir/left (registers 6) :gmir/right (registers 7)}
-                        {:gmir/op :gmir/add :gmir/dst (registers 10)
-                         :gmir/left (registers 9) :gmir/right (registers 8)}
-                        {:gmir/op :gmir/return :gmir/value (registers 10)}]))}
-        allocated (->> program (mir/select-target :x86-64) mir/allocate-registers)]
-    (is (= 11 (:mir/frame-slots allocated)))
-    (is (= allocated
-           (->> program (mir/select-target :x86-64) mir/allocate-registers)))
-    (is (some #(= :mir/spill-store (:mir/op %)) (:mir/instructions allocated)))
-    (is (some #(= :mir/spill-load (:mir/op %)) (:mir/instructions allocated)))
-    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
+  (with-scratch-tier-only
+    (let [registers (mapv gmir/vreg (range 11))
+          program {:gmir/version 1
+                   :gmir/instructions
+                   (vec (concat
+                         (map-indexed (fn [index register]
+                                        {:gmir/op :gmir/constant :gmir/dst register
+                                         :gmir/value index})
+                                      (subvec registers 0 6))
+                         [{:gmir/op :gmir/add :gmir/dst (registers 6)
+                           :gmir/left (registers 0) :gmir/right (registers 1)}
+                          {:gmir/op :gmir/add :gmir/dst (registers 7)
+                           :gmir/left (registers 2) :gmir/right (registers 3)}
+                          {:gmir/op :gmir/add :gmir/dst (registers 8)
+                           :gmir/left (registers 4) :gmir/right (registers 5)}
+                          {:gmir/op :gmir/add :gmir/dst (registers 9)
+                           :gmir/left (registers 6) :gmir/right (registers 7)}
+                          {:gmir/op :gmir/add :gmir/dst (registers 10)
+                           :gmir/left (registers 9) :gmir/right (registers 8)}
+                          {:gmir/op :gmir/return :gmir/value (registers 10)}]))}
+          allocated (->> program (mir/select-target :x86-64) mir/allocate-registers)]
+      (is (= 11 (:mir/frame-slots allocated)))
+      (is (= allocated
+             (->> program (mir/select-target :x86-64) mir/allocate-registers)))
+      (is (some #(= :mir/spill-store (:mir/op %)) (:mir/instructions allocated)))
+      (is (some #(= :mir/spill-load (:mir/op %)) (:mir/instructions allocated)))
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))))))
 
 (deftest allocation-fails-closed
   (testing "use before definition"
@@ -369,16 +382,17 @@
       {:gmir/op :gmir/return :gmir/value result}]}))
 
 (deftest acyclic-multi-phi-join-coalesces-to-direct-edge-moves
-  (doseq [target mir/targets]
-    (let [allocated (->> dual-phi-program (mir/select-target target) mir/allocate-registers)
-          instructions (:mir/instructions allocated)]
-      (is (zero? (:mir/frame-slots allocated)))
-      (is (= (if (= :x86-64 target) 3 2)
-             (count (filter #(= :mir/move (:mir/op %)) instructions))))
-      (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load} (:mir/op %))
-                    instructions))
-      (is (= allocated
-             (->> dual-phi-program (mir/select-target target) mir/allocate-registers))))))
+  (with-scratch-tier-only
+    (doseq [target mir/targets]
+      (let [allocated (->> dual-phi-program (mir/select-target target) mir/allocate-registers)
+            instructions (:mir/instructions allocated)]
+        (is (zero? (:mir/frame-slots allocated)))
+        (is (= (if (= :x86-64 target) 3 2)
+               (count (filter #(= :mir/move (:mir/op %)) instructions))))
+        (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load} (:mir/op %))
+                      instructions))
+        (is (= allocated
+               (->> dual-phi-program (mir/select-target target) mir/allocate-registers)))))))
 
 (deftest cyclic-multi-phi-join-uses-one-reusable-temporary-slot
   (doseq [target mir/targets]
@@ -442,41 +456,42 @@
           (str target " " sources)))))
 
 (deftest phi-merge-slots-remain-disjoint-from-general-spills
-  (let [registers (mapv gmir/vreg (range 8))
-        [test a b c d e then-value else-value] registers
-        join-value (gmir/vreg 8)
-        result (gmir/vreg 9)
-        input {:gmir/version 2
-               :gmir/instructions
-               [{:gmir/op :gmir/constant :gmir/dst test :gmir/value 1}
-                {:gmir/op :gmir/constant :gmir/dst a :gmir/value 1}
-                {:gmir/op :gmir/constant :gmir/dst b :gmir/value 2}
-                {:gmir/op :gmir/constant :gmir/dst c :gmir/value 3}
-                {:gmir/op :gmir/constant :gmir/dst d :gmir/value 4}
-                {:gmir/op :gmir/constant :gmir/dst e :gmir/value 5}
-                {:gmir/op :gmir/branch-zero :gmir/test test :gmir/target :test.label/else}
-                {:gmir/op :gmir/label :gmir/id :test.label/then}
-                {:gmir/op :gmir/add :gmir/dst then-value :gmir/left a :gmir/right b}
-                {:gmir/op :gmir/label :gmir/id :test.label/then-exit}
-                {:gmir/op :gmir/jump :gmir/target :test.label/join}
-                {:gmir/op :gmir/label :gmir/id :test.label/else}
-                {:gmir/op :gmir/add :gmir/dst else-value :gmir/left c :gmir/right d}
-                {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
-                {:gmir/op :gmir/jump :gmir/target :test.label/join}
-                {:gmir/op :gmir/label :gmir/id :test.label/join}
-                {:gmir/op :gmir/phi :gmir/dst join-value
-                 :gmir/incomings
-                 [{:gmir/predecessor :test.label/then-exit :gmir/value then-value}
-                  {:gmir/predecessor :test.label/else-exit :gmir/value else-value}]}
-                {:gmir/op :gmir/add :gmir/dst result :gmir/left join-value :gmir/right e}
-                {:gmir/op :gmir/return :gmir/value result}]}
-        allocated (->> input (mir/select-target :x86-64) mir/allocate-registers)
-        instructions (:mir/instructions allocated)]
-    (is (= 10 (:mir/frame-slots allocated))
-        "the phi destination owns its ordinary spill slot; no extra merge slot exists")
-    (is (not-any? #(= :mir/move (:mir/op %)) instructions)
-        "the general spill path coalesces slots instead of introducing moves")
-    (is (not-any? #(= :mir/phi (:mir/op %)) (:mir/instructions allocated)))))
+  (with-scratch-tier-only
+    (let [registers (mapv gmir/vreg (range 8))
+          [test a b c d e then-value else-value] registers
+          join-value (gmir/vreg 8)
+          result (gmir/vreg 9)
+          input {:gmir/version 2
+                 :gmir/instructions
+                 [{:gmir/op :gmir/constant :gmir/dst test :gmir/value 1}
+                  {:gmir/op :gmir/constant :gmir/dst a :gmir/value 1}
+                  {:gmir/op :gmir/constant :gmir/dst b :gmir/value 2}
+                  {:gmir/op :gmir/constant :gmir/dst c :gmir/value 3}
+                  {:gmir/op :gmir/constant :gmir/dst d :gmir/value 4}
+                  {:gmir/op :gmir/constant :gmir/dst e :gmir/value 5}
+                  {:gmir/op :gmir/branch-zero :gmir/test test :gmir/target :test.label/else}
+                  {:gmir/op :gmir/label :gmir/id :test.label/then}
+                  {:gmir/op :gmir/add :gmir/dst then-value :gmir/left a :gmir/right b}
+                  {:gmir/op :gmir/label :gmir/id :test.label/then-exit}
+                  {:gmir/op :gmir/jump :gmir/target :test.label/join}
+                  {:gmir/op :gmir/label :gmir/id :test.label/else}
+                  {:gmir/op :gmir/add :gmir/dst else-value :gmir/left c :gmir/right d}
+                  {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
+                  {:gmir/op :gmir/jump :gmir/target :test.label/join}
+                  {:gmir/op :gmir/label :gmir/id :test.label/join}
+                  {:gmir/op :gmir/phi :gmir/dst join-value
+                   :gmir/incomings
+                   [{:gmir/predecessor :test.label/then-exit :gmir/value then-value}
+                    {:gmir/predecessor :test.label/else-exit :gmir/value else-value}]}
+                  {:gmir/op :gmir/add :gmir/dst result :gmir/left join-value :gmir/right e}
+                  {:gmir/op :gmir/return :gmir/value result}]}
+          allocated (->> input (mir/select-target :x86-64) mir/allocate-registers)
+          instructions (:mir/instructions allocated)]
+      (is (= 10 (:mir/frame-slots allocated))
+          "the phi destination owns its ordinary spill slot; no extra merge slot exists")
+      (is (not-any? #(= :mir/move (:mir/op %)) instructions)
+          "the general spill path coalesces slots instead of introducing moves")
+      (is (not-any? #(= :mir/phi (:mir/op %)) (:mir/instructions allocated))))))
 
 (def scalar-call-module
   {:gmir/version 3
@@ -544,51 +559,52 @@
                (:mir/arguments tail)) target)))))
 
 (deftest v3-fifth-call-argument-is-loaded-directly-from-one-entry-slot
-  (let [args (mapv gmir/vreg (range 5))
-        result (gmir/vreg 5)
-        module {:gmir/version 3
-                :gmir/entry 'main
-                :gmir/functions
-                [{:gmir/name 'callee :gmir/arity 5
-                  :gmir/instructions
-                  (conj (mapv (fn [index register]
-                                {:gmir/op :gmir/argument :gmir/dst register
-                                 :gmir/index index})
-                              (range 5) args)
-                        {:gmir/op :gmir/return :gmir/value v0})}
-                 {:gmir/name 'main :gmir/arity 5
-                  :gmir/instructions
-                  (vec (concat
-                        (map-indexed
-                         (fn [index register]
-                           {:gmir/op :gmir/argument :gmir/dst register
-                            :gmir/index index}) args)
-                        [{:gmir/op :gmir/call :gmir/dst result
-                          :gmir/callee 'callee :gmir/arguments args}
-                         {:gmir/op :gmir/return :gmir/value result}]))}]}]
-    (doseq [target mir/targets]
-      (let [caller (second (:mir/functions
-                            (->> module (mir/select-target target)
-                                 mir/allocate-registers)))
-            instructions (:mir/instructions caller)
-            call-index (first (keep-indexed
-                               (fn [index instruction]
-                                 (when (= :mir/call (:mir/op instruction)) index))
-                               instructions))
-            stores (filterv #(= :mir/spill-store (:mir/op %)) instructions)
-            loads (filterv #(= :mir/spill-load (:mir/op %)) instructions)
-            fifth-input (nth (get mir/call-argument-registers target) 4)]
-        (is (= :call-live (:mir/frame-policy caller)) target)
-        (is (= 1 (:mir/frame-slots caller)) target)
-        (is (= [{:mir/op :mir/spill-store :mir/src fifth-input :mir/slot 0}]
-               stores) target)
-        (is (= [{:mir/op :mir/spill-load :mir/dst fifth-input :mir/slot 0}]
-               loads) target)
-        (is (= (dec call-index)
-               (first (keep-indexed (fn [index instruction]
-                                      (when (= (first loads) instruction) index))
-                                    instructions)))
-            target)))))
+  (with-scratch-tier-only
+    (let [args (mapv gmir/vreg (range 5))
+          result (gmir/vreg 5)
+          module {:gmir/version 3
+                  :gmir/entry 'main
+                  :gmir/functions
+                  [{:gmir/name 'callee :gmir/arity 5
+                    :gmir/instructions
+                    (conj (mapv (fn [index register]
+                                  {:gmir/op :gmir/argument :gmir/dst register
+                                   :gmir/index index})
+                                (range 5) args)
+                          {:gmir/op :gmir/return :gmir/value v0})}
+                   {:gmir/name 'main :gmir/arity 5
+                    :gmir/instructions
+                    (vec (concat
+                          (map-indexed
+                           (fn [index register]
+                             {:gmir/op :gmir/argument :gmir/dst register
+                              :gmir/index index}) args)
+                          [{:gmir/op :gmir/call :gmir/dst result
+                            :gmir/callee 'callee :gmir/arguments args}
+                           {:gmir/op :gmir/return :gmir/value result}]))}]}]
+      (doseq [target mir/targets]
+        (let [caller (second (:mir/functions
+                              (->> module (mir/select-target target)
+                                   mir/allocate-registers)))
+              instructions (:mir/instructions caller)
+              call-index (first (keep-indexed
+                                 (fn [index instruction]
+                                   (when (= :mir/call (:mir/op instruction)) index))
+                                 instructions))
+              stores (filterv #(= :mir/spill-store (:mir/op %)) instructions)
+              loads (filterv #(= :mir/spill-load (:mir/op %)) instructions)
+              fifth-input (nth (get mir/call-argument-registers target) 4)]
+          (is (= :call-live (:mir/frame-policy caller)) target)
+          (is (= 1 (:mir/frame-slots caller)) target)
+          (is (= [{:mir/op :mir/spill-store :mir/src fifth-input :mir/slot 0}]
+                 stores) target)
+          (is (= [{:mir/op :mir/spill-load :mir/dst fifth-input :mir/slot 0}]
+                 loads) target)
+          (is (= (dec call-index)
+                 (first (keep-indexed (fn [index instruction]
+                                        (when (= (first loads) instruction) index))
+                                      instructions)))
+              target))))))
 
 (deftest v3-call-liveness-does-not-materialize-dead-values
   (let [module {:gmir/version 3
@@ -704,46 +720,47 @@
                           (:mir/instructions callee)))))))))
 
 (deftest v3-five-live-entry-arguments-spill-only-the-excess-input
-  (let [arguments (mapv gmir/vreg (range 5))
-        s01 (gmir/vreg 5)
-        s23 (gmir/vreg 6)
-        s014 (gmir/vreg 7)
-        result (gmir/vreg 8)
-        module {:gmir/version 3
-                :gmir/entry 'sum-five
-                :gmir/functions
-                [{:gmir/name 'sum-five :gmir/arity 5
-                  :gmir/instructions
-                  (vec (concat
-                        (map-indexed (fn [index value]
-                                       {:gmir/op :gmir/argument :gmir/dst value
-                                        :gmir/index index})
-                                     arguments)
-                        [{:gmir/op :gmir/add :gmir/dst s01
-                          :gmir/left (arguments 0) :gmir/right (arguments 1)}
-                         {:gmir/op :gmir/add :gmir/dst s23
-                          :gmir/left (arguments 2) :gmir/right (arguments 3)}
-                         {:gmir/op :gmir/add :gmir/dst s014
-                          :gmir/left s01 :gmir/right (arguments 4)}
-                         {:gmir/op :gmir/add :gmir/dst result
-                          :gmir/left s014 :gmir/right s23}
-                         {:gmir/op :gmir/return :gmir/value result}]))}]}]
-    (doseq [target mir/targets]
-      (let [function (first (:mir/functions
-                             (->> module (mir/select-target target)
-                                  mir/allocate-registers)))
-            instructions (:mir/instructions function)
-            fifth-input (nth (get mir/call-argument-registers target) 4)]
-        (is (= :allocator (:mir/frame-policy function)) target)
-        (is (= 1 (:mir/frame-slots function)) target)
-        (is (= [{:mir/op :mir/spill-store :mir/src fifth-input :mir/slot 0}]
-               (filterv #(= :mir/spill-store (:mir/op %)) instructions)) target)
-        (let [loads (filterv #(= :mir/spill-load (:mir/op %)) instructions)]
-          (is (= 1 (count loads)) target)
-          (is (= 0 (:mir/slot (first loads))) target)
-          (is (contains? (set (get mir/physical-registers target))
-                         (:mir/dst (first loads))) target))
-        (is (not-any? gmir/vreg? (tree-seq coll? seq function)) target)))))
+  (with-scratch-tier-only
+    (let [arguments (mapv gmir/vreg (range 5))
+          s01 (gmir/vreg 5)
+          s23 (gmir/vreg 6)
+          s014 (gmir/vreg 7)
+          result (gmir/vreg 8)
+          module {:gmir/version 3
+                  :gmir/entry 'sum-five
+                  :gmir/functions
+                  [{:gmir/name 'sum-five :gmir/arity 5
+                    :gmir/instructions
+                    (vec (concat
+                          (map-indexed (fn [index value]
+                                         {:gmir/op :gmir/argument :gmir/dst value
+                                          :gmir/index index})
+                                       arguments)
+                          [{:gmir/op :gmir/add :gmir/dst s01
+                            :gmir/left (arguments 0) :gmir/right (arguments 1)}
+                           {:gmir/op :gmir/add :gmir/dst s23
+                            :gmir/left (arguments 2) :gmir/right (arguments 3)}
+                           {:gmir/op :gmir/add :gmir/dst s014
+                            :gmir/left s01 :gmir/right (arguments 4)}
+                           {:gmir/op :gmir/add :gmir/dst result
+                            :gmir/left s014 :gmir/right s23}
+                           {:gmir/op :gmir/return :gmir/value result}]))}]}]
+      (doseq [target mir/targets]
+        (let [function (first (:mir/functions
+                               (->> module (mir/select-target target)
+                                    mir/allocate-registers)))
+              instructions (:mir/instructions function)
+              fifth-input (nth (get mir/call-argument-registers target) 4)]
+          (is (= :allocator (:mir/frame-policy function)) target)
+          (is (= 1 (:mir/frame-slots function)) target)
+          (is (= [{:mir/op :mir/spill-store :mir/src fifth-input :mir/slot 0}]
+                 (filterv #(= :mir/spill-store (:mir/op %)) instructions)) target)
+          (let [loads (filterv #(= :mir/spill-load (:mir/op %)) instructions)]
+            (is (= 1 (count loads)) target)
+            (is (= 0 (:mir/slot (first loads))) target)
+            (is (contains? (set (get mir/physical-registers target))
+                           (:mir/dst (first loads))) target))
+          (is (not-any? gmir/vreg? (tree-seq coll? seq function)) target))))))
 
 (deftest v3-excess-entry-argument-reuses-its-call-live-slot
   (let [arguments (mapv gmir/vreg (range 5))
@@ -951,3 +968,145 @@
                                           %)
                                        instructions)))))
           [target kind]))))
+
+;; ── The tiers themselves ─────────────────────────────────────────────────────
+
+(deftest allocator-pool-offers-the-leaf-tier-only-to-functions-that-call-nothing
+  (doseq [target mir/targets]
+    (let [leaf (mir/allocator-pool target {:leaf? true})
+          calling (mir/allocator-pool target {:leaf? false})]
+      (is (= (count (distinct leaf)) (count leaf)) target)
+      (is (= (count (distinct calling)) (count calling)) target)
+      (is (= (vec (concat (get mir/physical-registers target)
+                          (get mir/leaf-registers target)
+                          (get mir/preserved-registers target)))
+             leaf) target)
+      (is (empty? (filter (set (get mir/leaf-registers target)) calling)) target)
+      ;; The scratch tier comes first so a function small enough to stay inside
+      ;; it names no preserved register and its frame saves nothing.
+      (is (= (get mir/physical-registers target)
+             (subvec leaf 0 (count (get mir/physical-registers target))))
+          target))))
+
+(deftest a-tier-register-is-never-two-things-at-once
+  (doseq [target mir/targets]
+    (let [scratch (set (get mir/physical-registers target))
+          leaf (set (get mir/leaf-registers target))
+          preserved (set (get mir/preserved-registers target))]
+      (is (empty? (clojure.set/intersection scratch leaf)) target)
+      (is (empty? (clojure.set/intersection scratch preserved)) target)
+      (is (empty? (clojure.set/intersection leaf preserved)) target)
+      ;; A callee-saved register the caller also passes arguments in would be
+      ;; saved and clobbered by the same function.
+      (is (empty? (clojure.set/intersection
+                   preserved (set (get mir/call-argument-registers target))))
+          target))))
+
+(deftest eleven-live-values-fit-without-touching-the-stack
+  (let [registers (mapv gmir/vreg (range 11))
+        program {:gmir/version 1
+                 :gmir/instructions
+                 (vec (concat
+                       (map-indexed (fn [index register]
+                                      {:gmir/op :gmir/constant :gmir/dst register
+                                       :gmir/value index})
+                                    (subvec registers 0 6))
+                       [{:gmir/op :gmir/add :gmir/dst (registers 6)
+                         :gmir/left (registers 0) :gmir/right (registers 1)}
+                        {:gmir/op :gmir/add :gmir/dst (registers 7)
+                         :gmir/left (registers 2) :gmir/right (registers 3)}
+                        {:gmir/op :gmir/add :gmir/dst (registers 8)
+                         :gmir/left (registers 4) :gmir/right (registers 5)}
+                        {:gmir/op :gmir/add :gmir/dst (registers 9)
+                         :gmir/left (registers 6) :gmir/right (registers 7)}
+                        {:gmir/op :gmir/add :gmir/dst (registers 10)
+                         :gmir/left (registers 9) :gmir/right (registers 8)}
+                        {:gmir/op :gmir/return :gmir/value (registers 10)}]))}
+        allocated (->> program (mir/select-target :x86-64) mir/allocate-registers)]
+    ;; The same program the exhaustion test uses. Under the scratch tier alone
+    ;; it takes eleven stack slots; with the tiers on offer it takes none.
+    (is (zero? (:mir/frame-slots allocated)))
+    (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load} (:mir/op %))
+                  (:mir/instructions allocated)))
+    (is (= allocated
+           (->> program (mir/select-target :x86-64) mir/allocate-registers)))))
+
+(deftest five-live-entry-arguments-now-all-arrive-in-registers
+  (let [arguments (mapv gmir/vreg (range 5))
+        [s01 s23 s014 result] (map gmir/vreg (range 5 9))
+        module {:gmir/version 3
+                :gmir/entry 'sum-five
+                :gmir/functions
+                [{:gmir/name 'sum-five :gmir/arity 5
+                  :gmir/instructions
+                  (vec (concat
+                        (map-indexed (fn [index value]
+                                       {:gmir/op :gmir/argument :gmir/dst value
+                                        :gmir/index index})
+                                     arguments)
+                        [{:gmir/op :gmir/add :gmir/dst s01
+                          :gmir/left (arguments 0) :gmir/right (arguments 1)}
+                         {:gmir/op :gmir/add :gmir/dst s23
+                          :gmir/left (arguments 2) :gmir/right (arguments 3)}
+                         {:gmir/op :gmir/add :gmir/dst s014
+                          :gmir/left s01 :gmir/right (arguments 4)}
+                         {:gmir/op :gmir/add :gmir/dst result
+                          :gmir/left s014 :gmir/right s23}
+                         {:gmir/op :gmir/return :gmir/value result}]))}]}]
+    (doseq [target mir/targets]
+      (let [function (first (:mir/functions
+                             (->> module (mir/select-target target)
+                                  mir/allocate-registers)))]
+        (is (= :allocator (:mir/frame-policy function)) target)
+        (is (zero? (:mir/frame-slots function)) target)
+        (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
+                                  (:mir/op %))
+                      (:mir/instructions function)) target)))))
+
+(deftest saved-registers-names-exactly-what-the-body-uses
+  (doseq [target mir/targets]
+    (let [preserved (get mir/preserved-registers target)
+          registers (mapv gmir/vreg (range 11))
+          program {:gmir/version 1
+                   :gmir/instructions
+                   (vec (concat
+                         (map-indexed (fn [index register]
+                                        {:gmir/op :gmir/constant
+                                         :gmir/dst register :gmir/value index})
+                                      (subvec registers 0 6))
+                         [{:gmir/op :gmir/add :gmir/dst (registers 6)
+                           :gmir/left (registers 0) :gmir/right (registers 1)}
+                          {:gmir/op :gmir/add :gmir/dst (registers 7)
+                           :gmir/left (registers 2) :gmir/right (registers 3)}
+                          {:gmir/op :gmir/add :gmir/dst (registers 8)
+                           :gmir/left (registers 4) :gmir/right (registers 5)}
+                          {:gmir/op :gmir/add :gmir/dst (registers 9)
+                           :gmir/left (registers 6) :gmir/right (registers 7)}
+                          {:gmir/op :gmir/add :gmir/dst (registers 10)
+                           :gmir/left (registers 9) :gmir/right (registers 8)}
+                          {:gmir/op :gmir/return :gmir/value (registers 10)}]))}
+          instructions (:mir/instructions
+                        (->> program (mir/select-target target)
+                             mir/allocate-registers))
+          named (set (filter (set preserved) (tree-seq coll? seq instructions)))]
+      (is (= (filterv named preserved) (mir/saved-registers target instructions))
+          target)
+      ;; Reported in pool order, so a frame that saves them in order and
+      ;; restores them in reverse never has to sort anything.
+      (is (= (mir/saved-registers target instructions)
+             (filterv (set (mir/saved-registers target instructions)) preserved))
+          target)
+      (is (empty? (mir/saved-registers target [])) target))))
+
+(deftest a-body-that-stays-in-the-scratch-tier-saves-nothing
+  (doseq [target mir/targets]
+    (let [program {:gmir/version 1
+                   :gmir/instructions
+                   [{:gmir/op :gmir/constant :gmir/dst v0 :gmir/value 1}
+                    {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 2}
+                    {:gmir/op :gmir/add :gmir/dst v2 :gmir/left v0 :gmir/right v1}
+                    {:gmir/op :gmir/return :gmir/value v2}]}
+          instructions (:mir/instructions
+                        (->> program (mir/select-target target)
+                             mir/allocate-registers))]
+      (is (empty? (mir/saved-registers target instructions)) target))))
