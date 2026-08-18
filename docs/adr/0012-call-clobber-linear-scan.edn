@@ -8,7 +8,8 @@
             :fallback-policy :all-vregs
             :call-clobbers :caller-saved
             :live-across-preference :preserved-tier
-            :spill-placement :at-definition}
+            :spill-placement :at-definition
+            :reload-at-block-entry :backed-values}
  ;; Measured 2026-08-18 through amu, which executes native code. This
  ;; implementation returns wrong answers. The decision is not withdrawn; the
  ;; implementation is not safe to consume.
@@ -55,15 +56,19 @@
           :also #{:string-replace-all-wrong-content
                   :string-replace-all-wrong-byte-length
                   :multi-byte-case-traps}
-          :partial-cause :textual-last-use-across-a-back-edge
+          :partial-cause #{:textual-last-use-across-a-back-edge
+                           :reload-in-one-arm-keeps-assigned-for-the-other}
           :partial-fix {:predicate :back-edge?
                         :fixes #{:let-composes-with-recursion-within-the-fuel-budget}
                         :does-not-fix #{:string-contains? :string-replace-all}
                         :measured "62 failures -> 61"}
-          :not-yet-located "the loop string search lowers to is not a backward :mir/jump"
+          :partial-fix-2 {:drop-backed-at-label true
+                          :encoding-test :v3-else-arm-reloads-a-value-the-then-arm-already-reloaded
+                          :amu-measured false}
+          :not-yet-located "string search loop still unmeasured after sibling-arm reload drop"
           :invisible-to #{"kotoba-mir suite" "kotoba-native suite"}
           :why-invisible "neither repository executes a compiled program"
-          :do-not "advance amu onto this pin"}
+          :do-not "advance amu onto this pin until string-contains? is measured green"}
  :fallbacks #{:register-pressure}
  :claims {:cfg-liveness false
           :spill-slot-coloring false
