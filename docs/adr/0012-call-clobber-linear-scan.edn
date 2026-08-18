@@ -10,7 +10,8 @@
             :live-across-preference :preserved-tier
             :spill-placement :at-definition
             :reload-at-block-entry :backed-values
-            :back-edge :all-vregs}
+            :back-edge :all-vregs
+            :loops-with-calls :all-vregs}
  :fallbacks #{:register-pressure :back-edge}
  ;; Miscompile at 7f7c556 (62 amu failures) closed by execution, not by
  ;; encodings. Code that executed green is ac14016d; this commit records it.
@@ -37,13 +38,14 @@
  ;; covers on its own. The neutralisation was proved live rather than assumed:
  ;; the overridden file was made unparseable and the build failed.
  ;;
- ;; The call+loop corpus now exists (count-loop GMIR: call + backward jump,
- ;; acc live across both). Executed on judah, n in {0,1,5,50} => n, both
- ;; ISAs. Neutralising back-edge? is live and the policy stays [:all-vregs 8]
- ;; -- the scanner spill-falls back. The predicate is still not load-bearing
- ;; on a program that has a back edge. It stays because removing it would
- ;; not change this function, and we still do not have a call+loop the
- ;; scanner can complete.
+ ;; The call+loop corpus exists and executes (count-loop, n in {0,1,5,50}
+ ;; => n). Neutralising back-edge? is live and the policy stays all-vreg:
+ ;; the scanner spill-falls back. A second terminating shape (countdown:
+ ;; only n carried, body calls id(n)) does the same. last-uses is textual,
+ ;; so a terminating loop's induction variable is defined after the header
+ ;; phi that uses it. There is no terminating call+loop the scanner can
+ ;; complete while :cfg-liveness is false. Call+loop takes :all-vregs by
+ ;; contract. back-edge? stays; remove it when last-uses follow labels.
  :defect-closed {:since "7f7c55691697ba25abf6d732870a159433ce1fab"
                  :code "ac14016d1cb07a9d0a4c1942452c6340814cbaae"
                  :reproducer "(defn main [] (if (string-contains? \"abcdef\" \"def\") 1 0))"
@@ -77,7 +79,11 @@
                                                       :policy [:all-vregs 8]
                                                       :neutralised-policy [:all-vregs 8]
                                                       :scanner :spill-fallback}
-                                   :remove-only-with "a call+loop the linear scanner can complete"}}
+                                   :terminating-loop-scanner :empty
+                                   :why-empty "induction variable defined in the body, used at the header phi; last-uses cannot see the back edge"
+                                   :second-shape {:encoding-test :v3-terminating-call-loops-cannot-complete-the-scanner
+                                                  :module :countdown-module}
+                                   :remove-only-with "cfg-liveness: last-uses that follow labels and back edges"}}
  :claims {:cfg-liveness false
           :spill-slot-coloring false
           :rust-performance-parity false

@@ -1525,3 +1525,66 @@
       (is (has-back-edge? instructions) target)
       (is (= :all-vregs (:mir/frame-policy looper)) target)
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target))))
+
+(def countdown-module
+  "A second terminating call+loop: only `n` is carried, body calls `id(n)`.
+  Same SSA hole as count-loop — the latch value is defined after the header
+  phi that uses it — so this is not a shape the scanner can complete either."
+  (let [n0 (gmir/vreg 0)
+        n (gmir/vreg 1)
+        n1 (gmir/vreg 2)
+        one (gmir/vreg 3)
+        ignored (gmir/vreg 4)]
+    {:gmir/version 3
+     :gmir/entry 'countdown
+     :gmir/functions
+     [{:gmir/name 'id :gmir/arity 1
+       :gmir/instructions
+       [{:gmir/op :gmir/argument :gmir/dst (gmir/vreg 0) :gmir/index 0}
+        {:gmir/op :gmir/return :gmir/value (gmir/vreg 0)}]}
+      {:gmir/name 'countdown :gmir/arity 1
+       :gmir/instructions
+       [{:gmir/op :gmir/label :gmir/id :test.label/preheader}
+        {:gmir/op :gmir/argument :gmir/dst n0 :gmir/index 0}
+        {:gmir/op :gmir/jump :gmir/target :test.label/header}
+        {:gmir/op :gmir/label :gmir/id :test.label/header}
+        {:gmir/op :gmir/phi :gmir/dst n
+         :gmir/incomings [{:gmir/predecessor :test.label/preheader :gmir/value n0}
+                          {:gmir/predecessor :test.label/latch :gmir/value n1}]}
+        {:gmir/op :gmir/branch-zero :gmir/test n :gmir/target :test.label/done}
+        {:gmir/op :gmir/label :gmir/id :test.label/body}
+        {:gmir/op :gmir/call :gmir/dst ignored :gmir/callee 'id
+         :gmir/arguments [n]}
+        {:gmir/op :gmir/constant :gmir/dst one :gmir/value 1}
+        {:gmir/op :gmir/subtract :gmir/dst n1 :gmir/left n :gmir/right one}
+        {:gmir/op :gmir/label :gmir/id :test.label/latch}
+        {:gmir/op :gmir/jump :gmir/target :test.label/header}
+        {:gmir/op :gmir/label :gmir/id :test.label/done}
+        {:gmir/op :gmir/return :gmir/value n}]}]}))
+
+(defn- looper-policy [module fname target]
+  (let [allocated (->> module
+                       (mir/select-target target)
+                       mir/allocate-registers)
+        looper (->> allocated :mir/functions
+                    (filter #(= fname (:mir/name %)))
+                    first)]
+    (:mir/frame-policy looper)))
+
+(deftest v3-terminating-call-loops-cannot-complete-the-scanner
+  ;; Iteration 22 asked for a call+loop the linear scanner can complete.
+  ;; last-uses is the highest instruction index of a source. A terminating
+  ;; loop's induction variable is defined in the body and used at the header
+  ;; phi, so that source is neither assigned nor backed. Neutralising
+  ;; back-edge? still spill-falls back on two different terminating shapes.
+  ;; The set is empty until :cfg-liveness. Do not remove back-edge?.
+  (let [calls (atom 0)]
+    (with-redefs [mir/back-edge? (fn [_]
+                                   (swap! calls inc)
+                                   false)]
+      (doseq [target mir/targets
+              [module fname] [[call-and-back-edge-module 'count-loop]
+                              [countdown-module 'countdown]]]
+        (is (= :all-vregs (looper-policy module fname target))
+            [target fname])))
+    (is (pos? @calls) "the override ran; green is not an unapplied redef")))

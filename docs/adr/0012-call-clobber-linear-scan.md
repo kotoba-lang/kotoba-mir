@@ -50,11 +50,16 @@ call and a loop, not against this one.
 That corpus now exists: `v3-call-plus-back-edge-is-routed-to-all-vregs` and
 amu `a-call-and-a-back-edge-in-one-function-execute` (n in {0,1,5,50} equals
 n, both ISAs). Neutralising `back-edge?` was proved live (the override
-ran) and the policy stayed `[:all-vregs 8]`: the linear scanner
-spill-falls back on this loop. The predicate is still not load-bearing on
-a program that actually has a back edge. It stays because removing it
-would not change this function, and we still do not have a call+loop the
-scanner can complete. `:cfg-liveness` remains false.
+ran) and the policy stayed `[:all-vregs 8]`. A second terminating shape
+(`countdown`: only `n` carried, body calls `id(n)`) does the same.
+
+That is not a property of one fixture. `last-uses` is the highest
+instruction index at which a vreg is a source. A terminating loop's
+induction variable is defined in the body and used at the header phi, so
+the phi source is neither assigned nor backed. There is no terminating
+call+loop the scanner can complete while `:cfg-liveness` is false.
+Call+loop takes `:all-vregs` by contract. `back-edge?` stays. Remove it
+when last-uses follow labels, not against a third loop shape.
 
 ## Context
 
@@ -117,6 +122,8 @@ wrong one — that is how `7f7c556` shipped. The namespaces that execute
 compiled programs are the gate for the next pin, not this repository's
 suite.
 
-`:cfg-liveness` is still false. Loops with calls still take all-vreg.
-Straight-line ADR 0006 still stores every live-across value. Neither is
-withdrawn by closing the miscompile.
+`:cfg-liveness` is still false. Loops with calls take all-vreg by contract,
+because a terminating loop's induction variable is defined after the header
+phi that uses it. Straight-line ADR 0006 still stores every live-across
+value. Neither is withdrawn by closing the miscompile. Do not remove
+`back-edge?` until last-uses follow labels.
