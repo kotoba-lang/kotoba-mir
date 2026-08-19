@@ -1470,7 +1470,8 @@
 
 (def call-and-back-edge-module
   "A function that contains a direct call and a backward jump, with `acc` and
-  `n` live across both. Kotoba `loop/recur` desugars to a recursive helper
+  `n` live across both. Arguments are a prefix so `entry-argument-plan` can
+  start. Kotoba `loop/recur` desugars to a recursive helper
   (frontend-destructuring-loop-test), and string-search loops live in the
   runtime, so this shape is not in the source corpus that iteration 21 ran."
   (let [n0 (gmir/vreg 0)
@@ -1490,9 +1491,9 @@
         {:gmir/op :gmir/return :gmir/value (gmir/vreg 0)}]}
       {:gmir/name 'count-loop :gmir/arity 1
        :gmir/instructions
-       [{:gmir/op :gmir/label :gmir/id :test.label/preheader}
-        {:gmir/op :gmir/argument :gmir/dst n0 :gmir/index 0}
+       [{:gmir/op :gmir/argument :gmir/dst n0 :gmir/index 0}
         {:gmir/op :gmir/constant :gmir/dst acc0 :gmir/value 0}
+        {:gmir/op :gmir/label :gmir/id :test.label/preheader}
         {:gmir/op :gmir/jump :gmir/target :test.label/header}
         {:gmir/op :gmir/label :gmir/id :test.label/header}
         {:gmir/op :gmir/phi :gmir/dst n
@@ -1528,8 +1529,8 @@
 
 (def countdown-module
   "A second terminating call+loop: only `n` is carried, body calls `id(n)`.
-  Same SSA hole as count-loop — the latch value is defined after the header
-  phi that uses it — so this is not a shape the scanner can complete either."
+  Arguments are a prefix so `entry-argument-plan` can start. After
+  `lower-phis`, latch values are stored after their defs."
   (let [n0 (gmir/vreg 0)
         n (gmir/vreg 1)
         n1 (gmir/vreg 2)
@@ -1544,8 +1545,8 @@
         {:gmir/op :gmir/return :gmir/value (gmir/vreg 0)}]}
       {:gmir/name 'countdown :gmir/arity 1
        :gmir/instructions
-       [{:gmir/op :gmir/label :gmir/id :test.label/preheader}
-        {:gmir/op :gmir/argument :gmir/dst n0 :gmir/index 0}
+       [{:gmir/op :gmir/argument :gmir/dst n0 :gmir/index 0}
+        {:gmir/op :gmir/label :gmir/id :test.label/preheader}
         {:gmir/op :gmir/jump :gmir/target :test.label/header}
         {:gmir/op :gmir/label :gmir/id :test.label/header}
         {:gmir/op :gmir/phi :gmir/dst n
@@ -1571,13 +1572,13 @@
                     first)]
     (:mir/frame-policy looper)))
 
-(deftest v3-terminating-call-loops-cannot-complete-the-scanner
-  ;; Iteration 22 asked for a call+loop the linear scanner can complete.
-  ;; last-uses is the highest instruction index of a source. A terminating
-  ;; loop's induction variable is defined in the body and used at the header
-  ;; phi, so that source is neither assigned nor backed. Neutralising
-  ;; back-edge? still spill-falls back on two different terminating shapes.
-  ;; The set is empty until :cfg-liveness. Do not remove back-edge?.
+(deftest v3-prefix-argument-call-loops-complete-the-scanner
+  ;; Iteration 23 read :all-vregs-with-override as last-uses failing on a
+  ;; header phi. The throw was :non-prefix-argument: both fixtures started
+  ;; with a label, and entry-argument-plan tags that :spill-required. After
+  ;; lower-phis, latch last-uses are after their defs. Arguments first, the
+  ;; scanner completes. Production still takes all-vreg via back-edge?.
+  ;; Do not remove the predicate; this is encodings, not amu execution.
   (let [calls (atom 0)]
     (with-redefs [mir/back-edge? (fn [_]
                                    (swap! calls inc)
@@ -1585,6 +1586,6 @@
       (doseq [target mir/targets
               [module fname] [[call-and-back-edge-module 'count-loop]
                               [countdown-module 'countdown]]]
-        (is (= :all-vregs (looper-policy module fname target))
+        (is (= :call-live (looper-policy module fname target))
             [target fname])))
     (is (pos? @calls) "the override ran; green is not an unapplied redef")))

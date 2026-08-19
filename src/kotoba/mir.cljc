@@ -1648,12 +1648,12 @@
   [allocated-program frame-policy].
 
   Call plus a backward jump takes all-vreg by contract, not as a per-function
-  accident. `last-uses` is the highest instruction index at which a vreg is a
-  source. A terminating loop's induction variable is defined in the body
-  (later index) and used at the header phi (earlier index), so the scanner
-  cannot complete that shape while `:cfg-liveness` is false. Do not wait for
-  a call+loop the scanner can complete; there is not one among terminating
-  loops. Do not remove `back-edge?` until last-uses follow labels."
+  accident. A prefix-argument terminating call+loop completes the scanner
+  (`:call-live`) when `back-edge?` is false: after `lower-phis`, latch values
+  are stored after their defs. Iteration 23's empty set was
+  `:non-prefix-argument` (label before `:mir/argument`), tagged
+  `:spill-required`. Do not remove `back-edge?` until that path executes in
+  amu. `:cfg-liveness` is still false."
   [program]
   (validate-flat! program)
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)
