@@ -39,13 +39,13 @@
  ;; the overridden file was made unparseable and the build failed.
  ;;
  ;; The call+loop corpus exists and executes (count-loop, n in {0,1,5,50}
- ;; => n). Neutralising back-edge? is live and the policy stays all-vreg:
- ;; the scanner spill-falls back. A second terminating shape (countdown:
- ;; only n carried, body calls id(n)) does the same. last-uses is textual,
- ;; so a terminating loop's induction variable is defined after the header
- ;; phi that uses it. There is no terminating call+loop the scanner can
- ;; complete while :cfg-liveness is false. Call+loop takes :all-vregs by
- ;; contract. back-edge? stays; remove it when last-uses follow labels.
+ ;; => n). Neutralising back-edge? on the iteration-23 fixtures stayed
+ ;; all-vreg because those fixtures started with a label:
+ ;; entry-argument-plan throws :non-prefix-argument, tagged :spill-required.
+ ;; After lower-phis, latch last-uses are after their defs. Arguments as
+ ;; prefix, the scanner completes (:call-live) with the predicate false.
+ ;; Production still takes all-vreg via back-edge?. Do not remove it until
+ ;; amu executes that scanner path. :cfg-liveness is still false.
  :defect-closed {:since "7f7c55691697ba25abf6d732870a159433ce1fab"
                  :code "ac14016d1cb07a9d0a4c1942452c6340814cbaae"
                  :reproducer "(defn main [] (if (string-contains? \"abcdef\" \"def\") 1 0))"
@@ -77,13 +77,12 @@
                                                       :execution-test :a-call-and-a-back-edge-in-one-function-execute
                                                       :oracle "n in #{0 1 5 50} => n, both ISAs"
                                                       :policy [:all-vregs 8]
-                                                      :neutralised-policy [:all-vregs 8]
-                                                      :scanner :spill-fallback}
-                                   :terminating-loop-scanner :empty
-                                   :why-empty "induction variable defined in the body, used at the header phi; last-uses cannot see the back edge"
-                                   :second-shape {:encoding-test :v3-terminating-call-loops-cannot-complete-the-scanner
+                                                      :neutralised-policy :call-live
+                                                      :scanner :completes-given-prefix-arguments
+                                                      :iteration-23-throw :non-prefix-argument}
+                                   :second-shape {:encoding-test :v3-prefix-argument-call-loops-complete-the-scanner
                                                   :module :countdown-module}
-                                   :remove-only-with "cfg-liveness: last-uses that follow labels and back edges"}}
+                                   :remove-only-with "amu execution of the scanner path, not encodings"}}
  :claims {:cfg-liveness false
           :spill-slot-coloring false
           :rust-performance-parity false
