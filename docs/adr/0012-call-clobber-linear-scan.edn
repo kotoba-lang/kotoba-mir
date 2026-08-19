@@ -10,9 +10,9 @@
             :live-across-preference :preserved-tier
             :spill-placement :at-definition
             :reload-at-block-entry :backed-values
-            :back-edge :all-vregs
-            :loops-with-calls :all-vregs}
- :fallbacks #{:register-pressure :back-edge}
+            :back-edge :call-live
+            :loops-with-calls :call-live}
+ :fallbacks #{:register-pressure}
  ;; Miscompile at 7f7c556 (62 amu failures) closed by execution, not by
  ;; encodings. Code that executed green is ac14016d; this commit records it.
  ;;
@@ -43,9 +43,11 @@
  ;; all-vreg because those fixtures started with a label:
  ;; entry-argument-plan throws :non-prefix-argument, tagged :spill-required.
  ;; After lower-phis, latch last-uses are after their defs. Arguments as
- ;; prefix, the scanner completes (:call-live) with the predicate false.
- ;; Production still takes all-vreg via back-edge?. Do not remove it until
- ;; amu executes that scanner path. :cfg-liveness is still false.
+ ;; prefix, the scanner completes (:call-live). Production uses that path:
+ ;; `back-edge?` is not a routing guard. Leftover pressure still falls back
+ ;; to all-vreg via :spill-required. Iteration 27: full amu suite with the
+ ;; predicate false, only the four production all-vreg policy asserts
+ ;; failed. :cfg-liveness is still false.
  :defect-closed {:since "7f7c55691697ba25abf6d732870a159433ce1fab"
                  :code "ac14016d1cb07a9d0a4c1942452c6340814cbaae"
                  :reproducer "(defn main [] (if (string-contains? \"abcdef\" \"def\") 1 0))"
@@ -71,18 +73,18 @@
                  :back-edge-guard {:load-bearing false
                                    :measured "suite identical with the predicate neutralised"
                                    :neutralisation-proved-live true
-                                   :retained :judgement
-                                   :cost "call+loop functions never reach the scanner"
-                                   :corpus-call-loop {:encoding-test :v3-call-plus-back-edge-is-routed-to-all-vregs
+                                   :removed true
+                                   :production-policy :call-live
+                                   :corpus-call-loop {:encoding-test :v3-call-plus-back-edge-is-routed-to-call-live
                                                       :execution-test :a-call-and-a-back-edge-in-one-function-execute
                                                       :oracle "n in #{0 1 5 50} => n, both ISAs"
-                                                      :policy [:all-vregs 8]
-                                                      :neutralised-policy :call-live
+                                                      :policy :call-live
                                                       :scanner :completes-given-prefix-arguments
-                                                      :iteration-23-throw :non-prefix-argument}
+                                                      :iteration-23-throw :non-prefix-argument
+                                                      :iteration-27 "full suite, predicate false: 4 policy-assert fails only"}
                                    :second-shape {:encoding-test :v3-prefix-argument-call-loops-complete-the-scanner
                                                   :module :countdown-module}
-                                   :remove-only-with "amu execution of the scanner path, not encodings"}}
+                                   :evidence "amu execution of the scanner path (iterations 25-27)"}}
  :claims {:cfg-liveness false
           :spill-slot-coloring false
           :rust-performance-parity false

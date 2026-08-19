@@ -1625,10 +1625,10 @@
   and its register has been given to something else, which is silent wrong
   code, not a missing optimisation.
 
-  ADR 0012 routes functions with control flow to the linear scanner. Until
-  its `:cfg-liveness` claim is true, the ones with a back edge keep the
-  conservative all-vreg path they had before. Forward-only control flow --
-  the `if` the ADR was written for -- still gets the scanner."
+  ADR 0012 routes functions with control flow to the linear scanner,
+  including those with a back edge. This predicate is not a routing guard.
+  Leftover pressure still falls back to all-vreg via `:spill-required`.
+  `:cfg-liveness` is still false: last-uses remain textual."
   [instructions]
   (let [label-index (reduce-kv (fn [indexes index instruction]
                                  (if (= :mir/label (:mir/op instruction))
@@ -1647,21 +1647,18 @@
   still cannot complete falls back to the conservative all-vreg path. Returns
   [allocated-program frame-policy].
 
-  Call plus a backward jump takes all-vreg by contract, not as a per-function
-  accident. A prefix-argument terminating call+loop completes the scanner
-  (`:call-live`) when `back-edge?` is false: after `lower-phis`, latch values
-  are stored after their defs. Iteration 23's empty set was
-  `:non-prefix-argument` (label before `:mir/argument`), tagged
-  `:spill-required`. Do not remove `back-edge?` until that path executes in
-  amu. `:cfg-liveness` is still false."
+  Call plus a backward jump uses the scanner (`:call-live`) when it
+  completes. After `lower-phis`, latch last-uses sit after their defs, so a
+  prefix-argument terminating call+loop is not `:spill-required`. Iteration
+  23's empty set was `:non-prefix-argument` (label before `:mir/argument`).
+  Iteration 27: the full amu suite with `back-edge?` false failed only the
+  production all-vreg policy asserts. `:cfg-liveness` is still false."
   [program]
   (validate-flat! program)
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)
         calls? (boolean (some #(call-operation? (:mir/op %))
                               (:mir/instructions program)))]
-    (if (and calls? (back-edge? (:mir/instructions program)))
-      [(allocate-with-spills program merge-dst-by-slot) :all-vregs]
-      (try
+    (try
       (let [allocated (coalesce-phi-transports
                        (allocate-without-spills program merge-slots)
                        merge-slots)]
@@ -1670,7 +1667,7 @@
         (if (= :spill-required (:problem (ex-data error)))
           [(allocate-with-spills program merge-dst-by-slot)
            (if calls? :all-vregs :allocator)]
-          (throw error)))))))
+          (throw error))))))
 
 (defn- allocate-flat
   "Allocate virtual MIR deterministically. No-call bodies spill only values

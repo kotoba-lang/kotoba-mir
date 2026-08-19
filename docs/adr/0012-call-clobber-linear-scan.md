@@ -21,9 +21,9 @@ returned 0 at `7f7c556` and 1 at `ac14016d`.
 
 This repository's suite and kotoba-native's still do not run a compiled
 program. Their green is not this measurement. `:cfg-liveness` remains
-false: a call-containing function with a backward jump still takes
-all-vreg. That conservative floor is not a ranking, and it is not a claim
-that LLVM is beaten.
+false: last-uses are still textual. Production call+loop uses the scanner
+(`:call-live`); leftover pressure still falls back to all-vreg. That is
+not a ranking, and it is not a claim that LLVM is beaten.
 
 ### The whole suite, and whether `back-edge?` is load-bearing
 
@@ -38,25 +38,20 @@ predicate had fixed. `drop-backed-at-label` carries every shape amu covers on
 its own. The neutralisation was proved live rather than assumed: the overridden
 file was made unparseable and the build failed.
 
-The predicate is retained anyway, and that is a **judgement, not a
-measurement**. It sends call-containing functions with a backward jump to
-all-vreg, so they never reach the scanner and do not get its frame savings;
-removing it would realise that. But the evidence for removing it is "a corpus
-we already know did not span this feature cannot tell the two apart" — the
-exact reasoning that let the original defect land (ADR-2608136000, fourth
-form). Remove it against a corpus containing a compiled function with both a
-call and a loop, not against this one.
+The predicate is **not** a routing guard. Iteration 27 ran the full amu
+suite with `back-edge?` false: only the four production all-vreg policy
+asserts failed. The scanner path already executed (iterations 25–26).
+Production call+loop is `:call-live`. Leftover pressure still falls back
+to all-vreg via `:spill-required`. `:cfg-liveness` is still false.
 
-That corpus now exists: `v3-call-plus-back-edge-is-routed-to-all-vregs` and
-amu `a-call-and-a-back-edge-in-one-function-execute` (n in {0,1,5,50} equals
+That corpus: `v3-call-plus-back-edge-is-routed-to-call-live` and amu
+`a-call-and-a-back-edge-in-one-function-execute` (n in {0,1,5,50} equals
 n, both ISAs). Neutralising `back-edge?` on the iteration-23 fixtures stayed
 `[:all-vregs 8]` because those fixtures started with a label:
 `entry-argument-plan` throws `:non-prefix-argument`, which is tagged
 `:spill-required`. After `lower-phis`, latch last-uses are after their
-defs. Arguments as prefix, the scanner completes (`:call-live`) with the
-predicate false (`v3-prefix-argument-call-loops-complete-the-scanner`).
-Production still takes all-vreg via `back-edge?`. Do not remove it until
-amu executes that scanner path. `:cfg-liveness` is still false.
+defs. Arguments as prefix, the scanner completes (`:call-live`)
+(`v3-prefix-argument-call-loops-complete-the-scanner`).
 
 ## Context
 
@@ -93,10 +88,10 @@ a source. It reads no label and no branch target. Two holes followed from
 routing control flow through that:
 
 1. A **back edge** re-reads a value after its textual interval ended.
-   `back-edge?` sends a call-containing function with a backward
+   `back-edge?` used to send a call-containing function with a backward
    `:mir/jump` or `:mir/branch-zero` to all-vreg. Measured: 62 failures
-   became 61. It fixes `let-composes-with-recursion` and does not see
-   string search.
+   became 61. It fixed `let-composes-with-recursion` and did not see
+   string search. It is no longer a routing guard; the scanner is.
 2. A **then-arm reload** keeps the value in `:assigned` for the else arm,
    which never executed that load and then reads leftover callee-saved
    garbage (`x20`). Store-at-definition does not prevent this. At every
@@ -119,8 +114,8 @@ wrong one — that is how `7f7c556` shipped. The namespaces that execute
 compiled programs are the gate for the next pin, not this repository's
 suite.
 
-`:cfg-liveness` is still false. Production still sends call+back-edge to
-all-vreg via `back-edge?`. A prefix-argument terminating call+loop
-completes the scanner when that predicate is false. Straight-line ADR 0006
-still stores every live-across value. Neither is withdrawn by closing the
-miscompile. Do not remove `back-edge?` until amu executes the scanner path.
+`:cfg-liveness` is still false. Production call+loop uses the scanner
+(`:call-live`). A prefix-argument terminating call+loop completes it.
+Straight-line ADR 0006 still stores every live-across value. Neither is
+withdrawn by closing the miscompile. Leftover pressure still falls back
+to all-vreg.

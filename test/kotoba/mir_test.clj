@@ -1514,7 +1514,7 @@
         {:gmir/op :gmir/label :gmir/id :test.label/done}
         {:gmir/op :gmir/return :gmir/value acc}]}]}))
 
-(deftest v3-call-plus-back-edge-is-routed-to-all-vregs
+(deftest v3-call-plus-back-edge-is-routed-to-call-live
   (doseq [target mir/targets]
     (let [allocated (->> call-and-back-edge-module
                          (mir/select-target target)
@@ -1524,7 +1524,7 @@
                       first)
           instructions (:mir/instructions looper)]
       (is (has-back-edge? instructions) target)
-      (is (= :all-vregs (:mir/frame-policy looper)) target)
+      (is (= :call-live (:mir/frame-policy looper)) target)
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target))))
 
 (def countdown-module
@@ -1577,15 +1577,10 @@
   ;; header phi. The throw was :non-prefix-argument: both fixtures started
   ;; with a label, and entry-argument-plan tags that :spill-required. After
   ;; lower-phis, latch last-uses are after their defs. Arguments first, the
-  ;; scanner completes. Production still takes all-vreg via back-edge?.
-  ;; Do not remove the predicate; this is encodings, not amu execution.
-  (let [calls (atom 0)]
-    (with-redefs [mir/back-edge? (fn [_]
-                                   (swap! calls inc)
-                                   false)]
-      (doseq [target mir/targets
-              [module fname] [[call-and-back-edge-module 'count-loop]
-                              [countdown-module 'countdown]]]
-        (is (= :call-live (looper-policy module fname target))
-            [target fname])))
-    (is (pos? @calls) "the override ran; green is not an unapplied redef")))
+  ;; scanner completes. Production uses that path; leftover pressure still
+  ;; falls back to all-vreg via :spill-required.
+  (doseq [target mir/targets
+          [module fname] [[call-and-back-edge-module 'count-loop]
+                          [countdown-module 'countdown]]]
+    (is (= :call-live (looper-policy module fname target))
+        [target fname])))
