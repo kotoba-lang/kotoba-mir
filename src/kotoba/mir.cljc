@@ -136,6 +136,13 @@
                           :mir/index :mir/maximum}
    :mir/kernel-store-u32 #{:mir/op :mir/dst :mir/base :mir/length
                            :mir/index :mir/stored :mir/maximum}
+   ;; The lock pair carries the load's fields: three sources in, one value
+   ;; out. No `:mir/stored` -- the stored word is fixed by the operation, not
+   ;; supplied by the guest.
+   :mir/kernel-try-lock-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                              :mir/index :mir/maximum}
+   :mir/kernel-unlock-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                            :mir/index :mir/maximum}
    :mir/kernel-subregion #{:mir/op :mir/dst :mir/base :mir/length
                            :mir/offset :mir/size}
    :mir/equal #{:mir/op :mir/dst :mir/left :mir/right}
@@ -235,7 +242,8 @@
           (when-not (register? register)
             (reject! :register-profile-violation instruction)))
         (when (and (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
-                                :mir/kernel-load-u32 :mir/kernel-store-u32} op)
+                                :mir/kernel-load-u32 :mir/kernel-store-u32
+                                :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32} op)
                    (not (register? (:mir/index instruction))))
           (reject! :register-profile-violation instruction))
         (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8} op)
@@ -245,6 +253,9 @@
             (reject! :invalid-kernel-memory-maximum instruction)))
         (when (contains? #{:mir/kernel-load-u32 :mir/kernel-store-u32} op)
           (when-not (= 512 (:mir/maximum instruction))
+            (reject! :invalid-kernel-memory-maximum instruction)))
+        (when (contains? #{:mir/kernel-try-lock-u32 :mir/kernel-unlock-u32} op)
+          (when-not (= 4096 (:mir/maximum instruction))
             (reject! :invalid-kernel-memory-maximum instruction)))
         (when (and (= op :mir/return) (not (register? (:mir/value instruction))))
           (reject! :register-profile-violation instruction))
@@ -449,6 +460,7 @@
                             :mir/f64-greater-or-equal :mir/f64-unordered
                             :mir/kernel-load-u8 :mir/kernel-store-u8
                             :mir/kernel-load-u32 :mir/kernel-store-u32
+                            :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32
                             :mir/kernel-subregion
                             :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
@@ -542,7 +554,8 @@
                              :mir/test :mir/value :mir/base :mir/length
                              :mir/stored :mir/offset :mir/size])
           (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
-                             :mir/kernel-load-u32 :mir/kernel-store-u32}
+                             :mir/kernel-load-u32 :mir/kernel-store-u32
+                             :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32}
                            (:mir/op instruction))
             [(:mir/index instruction)])
           (when (vector? (:mir/arguments instruction))
@@ -1537,7 +1550,8 @@
                {:mir/op op :mir/dst r0 :mir/input r0}
                (store-value instruction dst r0)]
 
-              (:mir/kernel-load-u8 :mir/kernel-load-u32)
+              (:mir/kernel-load-u8 :mir/kernel-load-u32
+               :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32)
               [(load-value instruction base r0)
                (load-value instruction length r1)
                (load-value instruction index r2)
