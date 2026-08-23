@@ -179,6 +179,29 @@
                           #"x86-privileged-target-mismatch"
                           (mir/select-target :aarch64 program)))))
 
+(deftest five-argument-atomic-action-is-allocatable
+  (let [arguments [v0 v1 v2 v3 v4]
+        program {:gmir/version 1
+                 :gmir/instructions
+                 (vec (concat
+                       (map-indexed
+                        (fn [index register]
+                          {:gmir/op :gmir/constant :gmir/dst register
+                           :gmir/value index})
+                        arguments)
+                       [{:gmir/op :gmir/x86-privileged :gmir/dst v5
+                         :gmir/action :compare-exchange-u32
+                         :gmir/arguments arguments}
+                        {:gmir/op :gmir/return :gmir/value v5}]))}
+        allocated (->> program
+                       (mir/select-target :x86-64)
+                       mir/allocate-registers)
+        operation (first (filter #(= :mir/x86-privileged (:mir/op %))
+                                 (:mir/instructions allocated)))]
+    (is (= :compare-exchange-u32 (:mir/action operation)))
+    (is (= 5 (count (:mir/arguments operation))))
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
+
 (deftest allocation-spills-deterministically-when-the-scratch-profile-is-exhausted
   (let [registers (mapv gmir/vreg (range 11))
         program {:gmir/version 1

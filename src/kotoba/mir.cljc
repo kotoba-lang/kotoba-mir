@@ -1159,7 +1159,14 @@
                (store-value instruction dst r0)]
 
               :mir/x86-privileged
-              (let [argument-registers (subvec [r0 r1] 0 (count arguments))]
+              ;; The closed GMIR action table owns arity. Use the target's
+              ;; five scalar argument registers instead of the old incidental
+              ;; two-scratch-register ceiling, so a checked bounded-memory
+              ;; action such as compare-exchange can carry its complete
+              ;; base/length/index/expected/desired tuple without hidden state.
+              (let [argument-registers
+                    (subvec (get call-argument-registers target)
+                            0 (count arguments))]
                 (concat
                  (mapv (fn [value register]
                          (load-value instruction value register))
