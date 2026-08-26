@@ -86,7 +86,9 @@
                                                   :module :countdown-module}
                                    :evidence "amu execution of the scanner path (iterations 25-27)"}}
  ;; failed. :cfg-liveness is true: last-uses are CFG-backed (2026-08-26).
+ ;; :cfg-dominator-tree is true: dominator sets + immediate dominators (2026-08-26).
  :claims {:cfg-liveness true
+          :cfg-dominator-tree true
           :spill-slot-coloring false
           :rust-performance-parity false
           :llvm-beaten false}}
