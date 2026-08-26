@@ -20,8 +20,8 @@ reproducer `(defn main [] (if (string-contains? "abcdef" "def") 1 0))`
 returned 0 at `7f7c556` and 1 at `ac14016d`.
 
 This repository's suite and kotoba-native's still do not run a compiled
-program. Their green is not this measurement. `:cfg-liveness` remains
-false: last-uses are still textual. Production call+loop uses the scanner
+program. Their green is not this measurement. `:cfg-liveness` is true:
+`last-uses` extend live-out across back edges (2026-08-26). Production call+loop uses the scanner
 (`:call-live`); leftover pressure still falls back to all-vreg. That is
 not a ranking, and it is not a claim that LLVM is beaten.
 
@@ -42,7 +42,7 @@ The predicate is **not** a routing guard. Iteration 27 ran the full amu
 suite with `back-edge?` false: only the four production all-vreg policy
 asserts failed. The scanner path already executed (iterations 25–26).
 Production call+loop is `:call-live`. Leftover pressure still falls back
-to all-vreg via `:spill-required`. `:cfg-liveness` is still false.
+to all-vreg via `:spill-required`. `:cfg-liveness` is true.
 
 That corpus: `v3-call-plus-back-edge-is-routed-to-call-live` and amu
 `a-call-and-a-back-edge-in-one-function-execute` (n in {0,1,5,50} equals
@@ -114,7 +114,7 @@ wrong one — that is how `7f7c556` shipped. The namespaces that execute
 compiled programs are the gate for the next pin, not this repository's
 suite.
 
-`:cfg-liveness` is still false. Production call+loop uses the scanner
+`:cfg-liveness` is true. Production call+loop uses the scanner
 (`:call-live`). A prefix-argument terminating call+loop completes it.
 Straight-line ADR 0006 still stores every live-across value. Neither is
 withdrawn by closing the miscompile. Leftover pressure still falls back

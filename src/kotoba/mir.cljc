@@ -801,11 +801,126 @@
                                                        (if used-temp? 1 0))
                                    :mir/instructions (vec out)))))))))
 
+(defn- instruction-def [instruction]
+  (when (gmir/vreg? (:mir/dst instruction))
+    (:mir/dst instruction)))
+
+(def ^:private terminators
+  #{:mir/jump :mir/branch-zero :mir/return})
+
+(defn- basic-blocks [instructions]
+  (let [n (count instructions)
+        leaders (sort
+                 (into #{0}
+                       (mapcat
+                        (fn [index]
+                          (let [op (:mir/op (nth instructions index))]
+                            (cond
+                              (= op :mir/label) [index]
+                              (contains? terminators op)
+                              (when (< (inc index) n) [(inc index)])
+                              :else nil)))
+                        (range n))))
+        block-count (count leaders)]
+    (mapv (fn [block-index]
+            (let [start (nth leaders block-index)
+                  end (if (< (inc block-index) block-count)
+                        (dec (nth leaders (inc block-index)))
+                        (dec n))]
+              {:index block-index :start start :end end}))
+          (range block-count))))
+
+(defn- label-block-indexes [instructions blocks]
+  (into {}
+        (keep (fn [{:keys [index start]}]
+                (when (= :mir/label (:mir/op (nth instructions start)))
+                  [(:mir/id (nth instructions start)) index]))
+              blocks)))
+
+(defn- block-successors [instructions blocks label->block]
+  (mapv (fn [{:keys [index end]}]
+          (let [op (:mir/op (nth instructions end))]
+            (cond
+              (= op :mir/return) []
+              (= op :mir/jump)
+              [(get label->block (:mir/target (nth instructions end)))]
+              (= op :mir/branch-zero)
+              (vec (remove nil?
+                           [(when (< (inc index) (count blocks)) (inc index))
+                            (get label->block
+                                 (:mir/target (nth instructions end)))]))
+              (< (inc index) (count blocks)) [(inc index)]
+              :else [])))
+        blocks))
+
+(defn- block-use-def [instructions blocks]
+  (mapv (fn [{:keys [start end]}]
+          (reduce (fn [{:keys [uses defs]} index]
+                    (let [instruction (nth instructions index)]
+                      {:uses (into uses (filter gmir/vreg? (sources instruction)))
+                       :defs (if-let [definition (instruction-def instruction)]
+                               (conj defs definition)
+                               defs)}))
+                  {:uses #{} :defs #{}}
+                  (range start (inc end))))
+        blocks))
+
+(defn- cfg-live-variables [instructions]
+  (let [blocks (basic-blocks instructions)
+        label->block (label-block-indexes instructions blocks)
+        successors (block-successors instructions blocks label->block)
+        use-def (block-use-def instructions blocks)
+        block-count (count blocks)
+        empty (vec (repeat block-count #{}))]
+    (loop [live-in empty
+           live-out empty]
+      (let [next-out (mapv (fn [block-index]
+                             (reduce into #{}
+                                     (map #(nth live-in %) (nth successors block-index))))
+                           (range block-count))
+            next-in (mapv (fn [block-index]
+                            (let [{:keys [uses defs]} (nth use-def block-index)
+                                  out (nth next-out block-index)]
+                              (into uses (remove defs out))))
+                          (range block-count))]
+        (if (and (= next-in live-in) (= next-out live-out))
+          {:blocks blocks :live-in next-in :live-out next-out}
+          (recur next-in next-out))))))
+
+(defn- back-edge-block-ends [instructions blocks label->block]
+  (into #{}
+        (keep (fn [{:keys [index end]}]
+                (let [op (:mir/op (nth instructions end))]
+                  (when (contains? #{:mir/jump :mir/branch-zero} op)
+                    (let [target (:mir/target (nth instructions end))
+                          target-block (get label->block target)]
+                      (when (and (some? target-block) (<= target-block index))
+                        end)))))
+              blocks)))
+
+(defn- cfg-last-uses [instructions]
+  (let [textual (reduce-kv
+                 (fn [uses index instruction]
+                   (reduce #(assoc %1 %2 index) uses
+                           (filter gmir/vreg? (sources instruction))))
+                 {} instructions)
+        blocks (basic-blocks instructions)
+        label->block (label-block-indexes instructions blocks)
+        {:keys [live-out]} (cfg-live-variables instructions)
+        back-edges (back-edge-block-ends instructions blocks label->block)]
+    (reduce (fn [uses block-index]
+              (let [end (:end (nth blocks block-index))]
+                (if (contains? back-edges end)
+                  (reduce (fn [out value]
+                            (assoc out value (max (get out value -1) end)))
+                          uses
+                          (nth live-out block-index))
+                  uses)))
+            textual
+            (range (count blocks)))))
+
 (defn- last-uses [instructions]
-  (reduce-kv
-   (fn [uses index instruction]
-     (reduce #(assoc %1 %2 index) uses (filter gmir/vreg? (sources instruction))))
-   {} instructions))
+  (cfg-last-uses instructions))
 
 (defn- ordered-vregs [values]
   (sort-by (fn [value] (or (:gmir/id value) (str value))) values))
@@ -1636,17 +1751,9 @@
 (defn- back-edge?
   "Does any jump or branch in INSTRUCTIONS target a label at or before it?
 
-  `last-uses` records the highest instruction INDEX at which a vreg is a
-  source. It reads no label and no branch target, so a value's interval ends
-  at its textually last use. That is sound exactly while textual order is
-  execution order. A back edge re-reads a value after its interval has ended
-  and its register has been given to something else, which is silent wrong
-  code, not a missing optimisation.
-
   ADR 0012 routes functions with control flow to the linear scanner,
   including those with a back edge. This predicate is not a routing guard.
-  Leftover pressure still falls back to all-vreg via `:spill-required`.
-  `:cfg-liveness` is still false: last-uses remain textual."
+  Leftover pressure still falls back to all-vreg via `:spill-required`."
   [instructions]
   (let [label-index (reduce-kv (fn [indexes index instruction]
                                  (if (= :mir/label (:mir/op instruction))
@@ -1670,7 +1777,7 @@
   prefix-argument terminating call+loop is not `:spill-required`. Iteration
   23's empty set was `:non-prefix-argument` (label before `:mir/argument`).
   Iteration 27: the full amu suite with `back-edge?` false failed only the
-  production all-vreg policy asserts. `:cfg-liveness` is still false."
+  production all-vreg policy asserts. `last-uses` is CFG-backed."
   [program]
   (validate-flat! program)
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)

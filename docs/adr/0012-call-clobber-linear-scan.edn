@@ -85,7 +85,8 @@
                                    :second-shape {:encoding-test :v3-prefix-argument-call-loops-complete-the-scanner
                                                   :module :countdown-module}
                                    :evidence "amu execution of the scanner path (iterations 25-27)"}}
- :claims {:cfg-liveness false
+ ;; failed. :cfg-liveness is true: last-uses are CFG-backed (2026-08-26).
+ :claims {:cfg-liveness true
           :spill-slot-coloring false
           :rust-performance-parity false
           :llvm-beaten false}}
