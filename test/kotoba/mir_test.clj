@@ -1584,3 +1584,14 @@
                           [countdown-module 'countdown]]]
     (is (= :call-live (looper-policy module fname target))
         [target fname])))
+
+(deftest cfg-liveness-extends-last-use-past-textual-use-on-back-edge
+  (let [cfg-last-uses @#'kotoba.mir/cfg-last-uses
+        [x y] (map gmir/vreg [0 1])
+        instructions
+        [{:mir/op :mir/label :mir/id :loop}
+         {:mir/op :mir/add :mir/dst y :mir/left x :mir/right x}
+         {:mir/op :mir/jump :mir/target :loop}]
+        last-use (cfg-last-uses instructions)]
+    (is (= 2 (get last-use x))
+        "x is textually last used at the add, but stays live through the back edge")))
