@@ -1,6 +1,7 @@
 (ns kotoba.mir
   "Closed target-selected Machine IR and deterministic allocation."
-  (:require [kotoba.gmir :as gmir]))
+  (:require [clojure.set :as set]
+            [kotoba.gmir :as gmir]))
 
 (def version 3)
 (def supported-versions #{1 2 3})
@@ -852,6 +853,72 @@
               (< (inc index) (count blocks)) [(inc index)]
               :else [])))
         blocks))
+
+(defn- block-predecessors [successors]
+  (let [block-count (count successors)]
+    (reduce (fn [preds from]
+              (reduce (fn [acc to]
+                        (update acc to (fnil conj #{}) from))
+                      preds
+                      (nth successors from)))
+            (vec (repeat block-count #{}))
+            (range block-count))))
+
+(defn- intersect-dominator-sets [sets]
+  (if (empty? sets)
+    #{}
+    (let [[head & tail] sets]
+      (reduce set/intersection head tail))))
+
+(defn- cfg-dominator-sets [predecessors]
+  (let [block-count (count predecessors)
+        universe (set (range block-count))
+        initial (mapv (fn [block-index]
+                        (if (zero? block-index) #{0} universe))
+                      (range block-count))]
+    (loop [dom initial]
+      (let [next-dom
+            (mapv (fn [block-index]
+                    (if (zero? block-index)
+                      #{0}
+                      (let [preds (seq (nth predecessors block-index))]
+                        (if preds
+                          (conj (intersect-dominator-sets
+                                 (map #(nth dom %) preds))
+                                block-index)
+                          (nth dom block-index)))))
+                  (range block-count))]
+        (if (= next-dom dom)
+          dom
+          (recur next-dom))))))
+
+(defn- cfg-immediate-dominators [dominators]
+  (mapv (fn [block-index]
+          (when (pos? block-index)
+            (let [strict (disj (nth dominators block-index) block-index)]
+              (first (filter (fn [candidate]
+                               (not (some (fn [other]
+                                            (and (not= other candidate)
+                                                 (contains? (nth dominators other)
+                                                            candidate)))
+                                          strict)))
+                             strict)))))
+        (range (count dominators))))
+
+(defn- cfg-dominates? [dominators dominator block-index]
+  (contains? (nth dominators block-index) dominator))
+
+(defn- cfg-dominator-analysis [instructions]
+  (let [blocks (basic-blocks instructions)
+        label->block (label-block-indexes instructions blocks)
+        successors (block-successors instructions blocks label->block)
+        predecessors (block-predecessors successors)
+        dominators (cfg-dominator-sets predecessors)]
+    {:blocks blocks
+     :successors successors
+     :predecessors predecessors
+     :dominators dominators
+     :immediate-dominators (cfg-immediate-dominators dominators)}))
 
 (defn- block-use-def [instructions blocks]
   (mapv (fn [{:keys [start end]}]

@@ -1595,3 +1595,55 @@
         last-use (cfg-last-uses instructions)]
     (is (= 2 (get last-use x))
         "x is textually last used at the add, but stays live through the back edge")))
+
+(deftest cfg-dominator-tree-linear-fallthrough
+  (let [cfg-dominator-analysis @#'kotoba.mir/cfg-dominator-analysis
+        cfg-dominates? @#'kotoba.mir/cfg-dominates?
+        [x] (map gmir/vreg [0])
+        instructions [{:mir/op :mir/add :mir/dst x :mir/left x :mir/right x}
+                      {:mir/op :mir/jump :mir/target :done}
+                      {:mir/op :mir/label :mir/id :done}
+                      {:mir/op :mir/return :mir/src x}]
+        {:keys [dominators immediate-dominators]} (cfg-dominator-analysis instructions)]
+    (is (= 2 (count dominators)))
+    (is (= #{0} (nth dominators 0)))
+    (is (= #{0 1} (nth dominators 1)))
+    (is (= 0 (nth immediate-dominators 1)))
+    (is (cfg-dominates? dominators 0 1))
+    (is (not (cfg-dominates? dominators 1 0)))))
+
+(deftest cfg-dominator-tree-if-else-merge
+  (let [cfg-dominator-analysis @#'kotoba.mir/cfg-dominator-analysis
+        [cond x y] (map gmir/vreg [0 1 2])
+        instructions [{:mir/op :mir/branch-zero :mir/left cond :mir/target :else}
+                      {:mir/op :mir/label :mir/id :then}
+                      {:mir/op :mir/add :mir/dst x :mir/left x :mir/right x}
+                      {:mir/op :mir/jump :mir/target :merge}
+                      {:mir/op :mir/label :mir/id :else}
+                      {:mir/op :mir/add :mir/dst y :mir/left y :mir/right y}
+                      {:mir/op :mir/jump :mir/target :merge}
+                      {:mir/op :mir/label :mir/id :merge}
+                      {:mir/op :mir/return :mir/src x}]
+        {:keys [dominators immediate-dominators]} (cfg-dominator-analysis instructions)]
+    (is (= #{0 1} (nth dominators 1)))
+    (is (= #{0 2} (nth dominators 2)))
+    (is (= #{0 3} (nth dominators 3)))
+    (is (= 0 (nth immediate-dominators 1)))
+    (is (= 0 (nth immediate-dominators 2)))
+    (is (= 0 (nth immediate-dominators 3)))))
+
+(deftest cfg-dominator-tree-loop-header
+  (let [cfg-dominator-analysis @#'kotoba.mir/cfg-dominator-analysis
+        [x] (map gmir/vreg [0])
+        instructions [{:mir/op :mir/branch-zero :mir/left x :mir/target :exit}
+                      {:mir/op :mir/label :mir/id :loop}
+                      {:mir/op :mir/add :mir/dst x :mir/left x :mir/right x}
+                      {:mir/op :mir/jump :mir/target :loop}
+                      {:mir/op :mir/label :mir/id :exit}
+                      {:mir/op :mir/return :mir/src x}]
+        {:keys [dominators immediate-dominators]} (cfg-dominator-analysis instructions)]
+    (is (= 3 (count dominators)))
+    (is (= #{0 1} (nth dominators 1)))
+    (is (= #{0 2} (nth dominators 2)))
+    (is (= 0 (nth immediate-dominators 1)))
+    (is (= 0 (nth immediate-dominators 2)))))
