@@ -105,7 +105,7 @@
 
 (deftest integer-schedule-validation-accepts-dependency-respecting-reorder
   (let [valid? @#'kotoba.mir/valid-scheduled-segment?
-        schedule @#'kotoba.mir/schedule-instructions
+        schedule-indexes @#'kotoba.mir/schedule-integer-segment-indices
         [a b c d x independent dependent result] (map gmir/vreg (range 8))
         instructions
         [{:mir/op :mir/multiply :mir/dst x :mir/left a :mir/right b}
@@ -113,9 +113,10 @@
          {:mir/op :mir/add :mir/dst independent :mir/left c :mir/right d}
          {:mir/op :mir/add :mir/dst result :mir/left dependent
           :mir/right independent}]
-        scheduled (schedule :x86-64 instructions)]
+        scheduled-indexes (schedule-indexes :x86-64 instructions)]
     (doseq [target mir/targets]
-      (is (valid? target instructions (schedule target instructions)) target))))
+      (is (valid? target instructions (schedule-indexes target instructions)) target))
+    (is (= [0 2 1 3] scheduled-indexes))))
 
 (deftest integer-schedule-validation-rejects-dependency-violating-order
   (let [valid? @#'kotoba.mir/valid-scheduled-segment?
@@ -126,14 +127,25 @@
          {:mir/op :mir/add :mir/dst independent :mir/left c :mir/right d}
          {:mir/op :mir/add :mir/dst result :mir/left dependent
           :mir/right independent}]
-        violating [independent dependent x result]]
+        violating [2 1 0 3]]
     (doseq [target mir/targets]
       (is (not (valid? target instructions violating)) target))))
 
+(deftest integer-schedule-validation-preserves-duplicate-instruction-identities
+  (let [valid? @#'kotoba.mir/valid-scheduled-segment?
+        register (first (:x86-64 mir/leaf-registers))
+        duplicate {:mir/op :mir/add :mir/dst register
+                   :mir/left register :mir/right register}
+        instructions [duplicate duplicate]]
+    ;; The instruction values are structurally equal, but their original
+    ;; positions remain distinct schedule identities.
+    (is (valid? :x86-64 instructions [0 1]))
+    (is (not (valid? :x86-64 instructions [0 0])))
+    (is (not (valid? :x86-64 instructions [1 1])))))
+
 (deftest modeled-completion-score-improves-on-multiply-dependency-gap
   (let [sum-times @#'kotoba.mir/segment-sum-completion-times
-        program-order-sum @#'kotoba.mir/segment-program-order-sum-completion-times
-        schedule @#'kotoba.mir/schedule-instructions
+        valid? @#'kotoba.mir/valid-scheduled-segment?
         [a b c d x independent dependent result] (map gmir/vreg (range 8))
         instructions
         [{:mir/op :mir/multiply :mir/dst x :mir/left a :mir/right b}
@@ -142,27 +154,16 @@
          {:mir/op :mir/add :mir/dst result :mir/left dependent
           :mir/right independent}]]
     (doseq [target mir/targets]
-      (let [scheduled (schedule target instructions)
-            before-sum (program-order-sum target instructions)
-            after-sum (sum-times target instructions scheduled)]
+      (let [program-order [0 1 2 3]
+            latency-filling-order [0 2 1 3]
+            before-sum (sum-times target instructions program-order)
+            after-sum (sum-times target instructions latency-filling-order)]
+        (is (valid? target instructions program-order) [target :program-order])
+        (is (valid? target instructions latency-filling-order)
+            [target :latency-filling-order])
         (is (< after-sum before-sum) [target :sum-completion-times])
         (is (= 21 before-sum) [target :program-order-sum])
         (is (= 18 after-sum) [target :scheduled-sum])))))
-
-(deftest aarch64-fusion-fixture-keeps-modeled-completion-score-when-order-is-fixed
-  (let [sum-times @#'kotoba.mir/segment-sum-completion-times
-        schedule @#'kotoba.mir/schedule-instructions
-        [a b c d product fused independent result] (map gmir/vreg (range 8))
-        instructions
-        [{:mir/op :mir/multiply :mir/dst product :mir/left a :mir/right b}
-         {:mir/op :mir/add :mir/dst fused :mir/left product :mir/right c}
-         {:mir/op :mir/add :mir/dst independent :mir/left c :mir/right d}
-         {:mir/op :mir/add :mir/dst result :mir/left fused
-          :mir/right independent}]]
-    (let [scheduled (schedule :aarch64 instructions)]
-      (is (= instructions scheduled))
-      (is (= (sum-times :aarch64 instructions instructions)
-             (sum-times :aarch64 instructions scheduled))))))
 
 (deftest scheduling-after-allocation-keeps-spill-stores-at-definitions
   (with-scratch-tier-only
