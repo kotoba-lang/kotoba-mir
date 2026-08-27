@@ -22,6 +22,58 @@
 (def v5 (gmir/vreg 5))
 (def v6 (gmir/vreg 6))
 
+(deftest latency-aware-scheduling-fills-an-integer-multiply-dependency-gap
+  (let [schedule @#'kotoba.mir/schedule-instructions
+        [a b c d x independent dependent result] (map gmir/vreg (range 8))
+        instructions
+        [{:mir/op :mir/multiply :mir/dst x :mir/left a :mir/right b}
+         {:mir/op :mir/multiply :mir/dst dependent :mir/left x :mir/right c}
+         {:mir/op :mir/add :mir/dst independent :mir/left c :mir/right d}
+         {:mir/op :mir/add :mir/dst result :mir/left dependent
+          :mir/right independent}]
+        expected [x independent dependent result]]
+    (doseq [target mir/targets]
+      (let [scheduled (schedule target instructions)]
+        (is (= expected (mapv :mir/dst scheduled)) target)
+        (is (= scheduled (schedule target instructions))
+            [target :deterministic])))))
+
+(deftest instruction-scheduling-keeps-trapping-and-effectful-barriers-fixed
+  (let [schedule @#'kotoba.mir/schedule-instructions
+        [a b c d x q y called z] (map gmir/vreg (range 9))
+        barrier-ops [:mir/quotient :mir/kernel-load-u8 :mir/call
+                     :mir/runtime-call :mir/capability-call
+                     :mir/branch-zero :mir/return]]
+    (doseq [target mir/targets
+            barrier-op barrier-ops]
+      (let [barrier (case barrier-op
+                      :mir/quotient
+                      {:mir/op barrier-op :mir/dst q :mir/left x :mir/right c}
+                      :mir/kernel-load-u8
+                      {:mir/op barrier-op :mir/dst q :mir/base a :mir/length b
+                       :mir/index c :mir/maximum 512}
+                      :mir/call
+                      {:mir/op barrier-op :mir/dst called :mir/callee 'callee
+                       :mir/arguments [x]}
+                      :mir/runtime-call
+                      {:mir/op barrier-op :mir/dst called :mir/runtime :print
+                       :mir/context-offset 0 :mir/arguments [x]}
+                      :mir/capability-call
+                      {:mir/op barrier-op :mir/dst called :mir/capability :test
+                       :mir/kind :i64 :mir/context-offset 0 :mir/arguments [x]}
+                      :mir/branch-zero
+                      {:mir/op barrier-op :mir/test x :mir/target :done}
+                      :mir/return
+                      {:mir/op barrier-op :mir/value x})
+            instructions
+            [{:mir/op :mir/multiply :mir/dst x :mir/left a :mir/right b}
+             barrier
+             {:mir/op :mir/add :mir/dst y :mir/left c :mir/right d}
+             {:mir/op :mir/add :mir/dst z :mir/left y :mir/right d}]
+            scheduled (schedule target instructions)]
+        (is (= barrier (nth scheduled 1)) [target barrier-op])
+        (is (= (count instructions) (count scheduled)) [target barrier-op])))))
+
 (deftest allocated-aarch64-admits-canonical-fused-multiply-operations
   (let [base {:mir/version 1 :mir/target :aarch64 :mir/registers :physical
               :mir/frame-slots 0}

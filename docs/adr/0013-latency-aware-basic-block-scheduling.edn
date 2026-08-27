@@ -1,0 +1,16 @@
+{:adr/id 13
+ :adr/status :accepted
+ :decision :latency-aware-basic-block-scheduling
+ :contract {:scope :consecutive-pure-integer-ssa
+            :barriers #{:constants :data-addresses :division :floating-point
+                        :memory :calls :phi :labels :branches :returns
+                        :target-selected-operations}
+            :dependency-order :preserved
+            :selection [:critical-path-height :original-index]
+            :deterministic true
+            :targets #{:x86-64 :aarch64}}
+ :claims {:instruction-scheduling true
+          :semantic-execution-evidence false
+          :runtime-speed-improvement false
+          :rust-performance-parity false
+          :llvm-beaten false}}
