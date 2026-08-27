@@ -614,149 +614,70 @@
                 (<= (get completion %) cycle))
           (nth predecessors index)))
 
-(defn- simulate-segment-latency
-  "Modeled issue-cycle makespan for one segment permutation. Uses the same
-  register-dependency readiness and one-issue-per-cycle advance as the list
-  scheduler, but commits the next ready instruction in ORDER-POSITION rather
-  than critical-path height. This is a portable structural score, not a
-  wall-clock performance measurement."
-  [target instructions order-positions]
-  (let [predecessors (segment-predecessors target instructions)]
-    (loop [cycle 0
-           remaining (set (range (count instructions)))
-           completion {}
-           max-done 0]
-      (if (empty? remaining)
-        max-done
-        (let [ready (->> remaining
-                         (filter (fn [index]
-                                   (segment-ready-at-cycle? predecessors
-                                                              completion
-                                                              cycle
-                                                              index)))
-                         (sort-by (fn [index] (order-positions index)))
-                         first)]
-          (if (nil? ready)
-            (recur (inc cycle) remaining completion max-done)
-            (let [done (+ cycle
-                          (scheduling-latency target
-                                              (nth instructions ready)))]
-              (recur (inc cycle)
-                     (disj remaining ready)
-                     (assoc completion ready done)
-                     (max max-done done))))))))
-
-(defn- simulate-program-order-latency
-  "Modeled makespan when instructions must issue strictly in program order.
-  Each cycle either issues the next not-yet-issued instruction or stalls."
-  [target instructions]
-  (let [predecessors (segment-predecessors target instructions)]
-    (loop [cycle 0
-           program-index 0
-           completion {}
-           max-done 0]
-      (if (= program-index (count instructions))
-        max-done
-        (if (segment-ready-at-cycle? predecessors completion cycle program-index)
-          (let [done (+ cycle
-                        (scheduling-latency target
-                                            (nth instructions program-index)))]
-            (recur (inc cycle)
-                   (inc program-index)
-                   (assoc completion program-index done)
-                   (max max-done done)))
-          (recur (inc cycle) program-index completion max-done)))))))
-
-(defn- segment-program-order-completion-times
-  [target instructions]
-  (let [predecessors (segment-predecessors target instructions)]
-    (loop [cycle 0
-           program-index 0
-           completion {}
-           times (vec (repeat (count instructions) 0))]
-      (if (= program-index (count instructions))
-        times
-        (if (segment-ready-at-cycle? predecessors completion cycle program-index)
-          (let [done (+ cycle
-                        (scheduling-latency target
-                                            (nth instructions program-index)))]
-            (recur (inc cycle)
-                   (inc program-index)
-                   (assoc completion program-index done)
-                   (assoc times program-index done)))
-          (recur (inc cycle) program-index completion times))))))
-
-(defn- segment-program-order-sum-completion-times
-  [target instructions]
-  (reduce + (segment-program-order-completion-times target instructions)))
-
-(defn- segment-order-positions [instructions order]
+(defn- segment-order-positions [order-indices]
   (into {}
-        (map-indexed (fn [position instruction]
-                       [instruction position])
-                     order)))
-
-(defn- segment-completion-times
-  [target instructions order]
-  (let [predecessors (segment-predecessors target instructions)
-        order-positions (segment-order-positions instructions order)]
-    (loop [cycle 0
-           remaining (set (range (count instructions)))
-           completion {}
-           times (vec (repeat (count instructions) 0))]
-      (if (empty? remaining)
-        times
-        (let [ready (->> remaining
-                         (filter (fn [index]
-                                   (segment-ready-at-cycle? predecessors
-                                                              completion
-                                                              cycle
-                                                              index)))
-                         (sort-by (fn [index] (order-positions index)))
-                         first)]
-          (if (nil? ready)
-            (recur (inc cycle) remaining completion times)
-            (let [done (+ cycle
-                          (scheduling-latency target
-                                              (nth instructions ready)))]
-              (recur (inc cycle)
-                     (disj remaining ready)
-                     (assoc completion ready done)
-                     (assoc times ready done)))))))))
-
-(defn- segment-sum-completion-times
-  [target instructions order]
-  (reduce + (segment-completion-times target instructions order)))
+        (map-indexed (fn [position original-index]
+                       [original-index position])
+                     order-indices)))
 
 (defn- valid-scheduled-segment?
-  "True when SCHEDULED is a register-dependency-respecting permutation of
-  INSTRUCTIONS within one schedulable segment."
-  [target instructions scheduled]
-  (and (= (count instructions) (count scheduled))
-       (= (set instructions) (set scheduled))
-       (let [predecessors (segment-predecessors target instructions)
-             positions (segment-order-positions instructions scheduled)]
-         (every? (fn [index]
-                   (every? #(< (positions (nth instructions %))
-                               (positions (nth instructions index)))
-                           (nth predecessors index)))
-                 (range (count instructions))))))
+  "True when ORDER-INDICES is an exact, register-dependency-respecting
+  permutation of the original integer indexes in INSTRUCTIONS."
+  [target instructions order-indices]
+  (let [instruction-count (count instructions)]
+    (and (= instruction-count (count order-indices))
+         (every? integer? order-indices)
+         (= (frequencies order-indices)
+            (zipmap (range instruction-count) (repeat 1)))
+         (let [predecessors (segment-predecessors target instructions)
+               positions (segment-order-positions order-indices)]
+           (every? (fn [index]
+                     (every? #(< (positions %)
+                                 (positions index))
+                             (nth predecessors index)))
+                   (range instruction-count))))))
 
 (defn- verify-scheduled-segment!
-  [target instructions scheduled]
-  (when-not (valid-scheduled-segment? target instructions scheduled)
+  [target instructions order-indices]
+  (when-not (valid-scheduled-segment? target instructions order-indices)
     (reject! :schedule-violates-register-dependencies
-             {:segment instructions :scheduled scheduled}))
-  scheduled)
+             {:segment instructions :scheduled-indexes order-indices}))
+  order-indices)
 
-(defn- schedule-integer-segment
-  "Deterministic dependency-aware list scheduling for one barrier-free SSA
-  segment. Critical-path height breaks ties first, original position second.
-  A conceptual issue cycle lets independent work fill modeled dependency
-  latency without inserting machine instructions or claiming wall-clock gain."
+(defn- segment-completion-times
+  "Modeled completion cycles for an explicit permutation of original integer
+  instruction indexes. This is a portable structural score, not wall-clock
+  performance evidence."
+  [target instructions order-indices]
+  (verify-scheduled-segment! target instructions order-indices)
+  (let [predecessors (segment-predecessors target instructions)
+        instruction-count (count instructions)]
+    (loop [cycle 0
+           order-position 0
+           completion {}
+           times (vec (repeat instruction-count 0))]
+      (if (= order-position instruction-count)
+        times
+        (let [index (nth order-indices order-position)]
+          (if (segment-ready-at-cycle? predecessors completion cycle index)
+            (let [done (+ cycle
+                          (scheduling-latency target
+                                              (nth instructions index)))]
+              (recur (inc cycle)
+                     (inc order-position)
+                     (assoc completion index done)
+                     (assoc times index done)))
+            (recur (inc cycle) order-position completion times)))))))
+
+(defn- segment-sum-completion-times
+  [target instructions order-indices]
+  (reduce + (segment-completion-times target instructions order-indices)))
+
+(defn- schedule-integer-segment-indices
+  "Return a deterministic dependency-aware permutation of original indexes."
   [target instructions]
   (if (< (count instructions) 2)
-    instructions
+    (vec (range (count instructions)))
     (let [predecessors (segment-predecessors target instructions)
           successors
           (reduce-kv (fn [out index inputs]
@@ -771,30 +692,40 @@
                   (vec (repeat (count instructions) 0))
                   (reverse (range (count instructions))))]
       (verify-scheduled-segment!
-        target
-        instructions
-        (loop [cycle 0
-               remaining (set (range (count instructions)))
-               completion {}
-               out []]
-          (if (empty? remaining)
-            out
-            (let [ready (->> remaining
-                             (filter (fn [index]
-                                       (every? #(and (contains? completion %)
-                                                     (<= (get completion %) cycle))
-                                               (nth predecessors index))))
-                             (sort-by (fn [index] [(- (nth heights index)) index]))
-                             first)]
-              (if (nil? ready)
-                (recur (inc cycle) remaining completion out)
-                (recur (inc cycle)
-                       (disj remaining ready)
-                       (assoc completion ready
-                              (+ cycle
-                                 (scheduling-latency target
-                                                     (nth instructions ready))))
-                       (conj out (nth instructions ready)))))))))))
+       target
+       instructions
+       (loop [cycle 0
+              remaining (set (range (count instructions)))
+              completion {}
+              out []]
+         (if (empty? remaining)
+           out
+           (let [ready (->> remaining
+                            (filter (fn [index]
+                                      (segment-ready-at-cycle? predecessors
+                                                                 completion
+                                                                 cycle
+                                                                 index)))
+                            (sort-by (fn [index] [(- (nth heights index)) index]))
+                            first)]
+             (if (nil? ready)
+               (recur (inc cycle) remaining completion out)
+               (recur (inc cycle)
+                      (disj remaining ready)
+                      (assoc completion ready
+                             (+ cycle
+                                (scheduling-latency target
+                                                    (nth instructions ready))))
+                      (conj out ready))))))))))
+
+(defn- schedule-integer-segment
+  "Deterministic dependency-aware list scheduling for one barrier-free SSA
+  segment. Critical-path height breaks ties first, original position second.
+  A conceptual issue cycle lets independent work fill modeled dependency
+  latency without inserting machine instructions or claiming wall-clock gain."
+  [target instructions]
+  (mapv #(nth instructions %)
+        (schedule-integer-segment-indices target instructions)))
 
 (defn- aarch64-fusion-pair?
   "True when INDEX and INDEX+1 are an already-adjacent multiply/add pair the
