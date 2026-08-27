@@ -586,6 +586,29 @@
 (defn- scheduling-latency [target instruction]
   (get-in scheduling-latencies [target (:mir/op instruction)] 1))
 
+(defn- scheduling-register? [target value]
+  (or (gmir/vreg? value) (physical-register? target value)))
+
+(defn- segment-predecessors [target instructions]
+  "Last-definition register dependencies within one scheduling segment. SSA
+  vregs and reused physical registers both resolve through the most recent
+  prior definition of each source register."
+  (loop [index 0
+         last-def {}
+         preds []]
+    (if (= index (count instructions))
+      preds
+      (let [instruction (nth instructions index)
+            pred-indexes (->> (instruction-sources instruction)
+                              (keep last-def)
+                              set)
+            last-def (if-let [dst (:mir/dst instruction)]
+                       (if (scheduling-register? target dst)
+                         (assoc last-def dst index)
+                         last-def)
+                       last-def)]
+        (recur (inc index) last-def (conj preds pred-indexes))))))
+
 (defn- schedule-integer-segment
   "Deterministic dependency-aware list scheduling for one barrier-free SSA
   segment. Critical-path height breaks ties first, original position second.
@@ -594,16 +617,7 @@
   [target instructions]
   (if (< (count instructions) 2)
     instructions
-    (let [definition-index
-          (reduce-kv (fn [out index {:mir/keys [dst]}]
-                       (cond-> out (gmir/vreg? dst) (assoc dst index)))
-                     {} instructions)
-          predecessors
-          (mapv (fn [instruction]
-                  (->> (instruction-sources instruction)
-                       (keep definition-index)
-                       set))
-                instructions)
+    (let [predecessors (segment-predecessors target instructions)
           successors
           (reduce-kv (fn [out index inputs]
                        (reduce #(update %1 %2 conj index) out inputs))
@@ -643,7 +657,7 @@
   "True when INDEX and INDEX+1 are an already-adjacent multiply/add pair the
   downstream AArch64 selector can turn into one MADD/MSUB. Keep such pairs
   fixed: separating them would regress code quality before MC fusion runs."
-  [instructions use-counts index]
+  [target instructions use-counts index]
   (let [multiply (nth instructions index nil)
         consumer (nth instructions (inc index) nil)
         product (:mir/dst multiply)
@@ -655,17 +669,17 @@
             (and (= :mir/subtract consumer-op)
                  (= product (:mir/right consumer))))]
     (and (= :mir/multiply (:mir/op multiply))
-         (gmir/vreg? product)
+         (scheduling-register? target product)
          (= 1 (get use-counts product))
          consumes-product?)))
 
 (defn- protected-scheduling-indexes [target instructions]
   (if-not (= :aarch64 target)
     #{}
-    (let [use-counts (frequencies (filter gmir/vreg?
+    (let [use-counts (frequencies (filter #(scheduling-register? target %)
                                           (mapcat instruction-sources instructions)))]
       (reduce (fn [out index]
-                (if (aarch64-fusion-pair? instructions use-counts index)
+                (if (aarch64-fusion-pair? target instructions use-counts index)
                   (conj out index (inc index))
                   out))
               #{}
@@ -673,29 +687,25 @@
 
 (defn- schedule-instructions
   "Schedule only consecutive pure integer segments. Barriers retain their
-  exact position relative to all surrounding segments. Control-flow functions
-  remain entirely unchanged until scheduling and CFG allocation share a proved
-  ordering contract."
+  exact position relative to all surrounding segments. Labels, branches,
+  spills, moves, and calls are barriers, so each basic block is scheduled
+  independently once register allocation has fixed physical identities."
   [target instructions]
-  (if (some #(contains? #{:mir/label :mir/branch-zero :mir/jump :mir/phi}
-                         (:mir/op %))
-            instructions)
-    instructions
-    (let [protected (protected-scheduling-indexes target instructions)]
+  (let [protected (protected-scheduling-indexes target instructions)]
     (letfn [(flush-segment [out segment]
               (into out (schedule-integer-segment target segment)))]
       (let [{:keys [out segment]}
-          (reduce (fn [{:keys [out segment]} instruction]
-                    (let [index (+ (count out) (count segment))]
-                      (if (and (not (contains? protected index))
-                               (contains? schedulable-integer-operations
-                                          (:mir/op instruction)))
-                      {:out out :segment (conj segment instruction)}
-                      {:out (conj (flush-segment out segment) instruction)
-                       :segment []})))
-                  {:out [] :segment []}
-                  instructions)]
-        (flush-segment out segment))))))
+            (reduce (fn [{:keys [out segment]} instruction]
+                      (let [index (+ (count out) (count segment))]
+                        (if (and (not (contains? protected index))
+                                 (contains? schedulable-integer-operations
+                                            (:mir/op instruction)))
+                          {:out out :segment (conj segment instruction)}
+                          {:out (conj (flush-segment out segment) instruction)
+                           :segment []})))
+                    {:out [] :segment []}
+                    instructions)]
+        (flush-segment out segment)))))
 
 (defn- schedule-program [{:mir/keys [target] :as program}]
   (update program :mir/instructions #(schedule-instructions target %)))
@@ -2084,16 +2094,21 @@
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)
         calls? (boolean (some #(call-operation? (:mir/op %))
                               (:mir/instructions program)))]
-    (try
-      (let [allocated (coalesce-phi-transports
-                       (allocate-without-spills program merge-slots)
-                       merge-slots)]
-        [allocated (if calls? :call-live :allocator)])
-      (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
-        (if (= :spill-required (:problem (ex-data error)))
-          [(allocate-with-spills program merge-dst-by-slot)
-           (if calls? :all-vregs :allocator)]
-          (throw error))))))
+    (let [schedule-allocated
+          (fn [allocated]
+            (schedule-program allocated))]
+      (try
+        (let [allocated (schedule-allocated
+                         (coalesce-phi-transports
+                          (allocate-without-spills program merge-slots)
+                          merge-slots))]
+          [allocated (if calls? :call-live :allocator)])
+        (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
+          (if (= :spill-required (:problem (ex-data error)))
+            [(schedule-allocated
+              (allocate-with-spills program merge-dst-by-slot))
+             (if calls? :all-vregs :allocator)]
+            (throw error)))))))
 
 (defn- allocate-flat
   "Allocate virtual MIR deterministically. No-call bodies spill only values
@@ -2101,7 +2116,7 @@
   live-across values in the preserved tier; leftover pressure still takes
   the conservative all-vreg path."
   [program]
-  (first (allocate-with-policy (schedule-program program))))
+  (first (allocate-with-policy program)))
 
 (defn allocate-registers
   "Allocate a legacy flat program or every function in a v3 module. A function
@@ -2111,7 +2126,8 @@
   caller-saved values are stored at their definition. Entry arguments beyond
   the four-register allocator profile use bounded direct ABI spills. Leftover
   pressure that the linear allocator cannot complete still takes the
-  conservative all-vreg path."
+  conservative all-vreg path. Pure integer scheduling runs after allocation on
+  physical MIR, one basic block at a time."
   [{:mir/keys [version target registers entry functions] :as program}]
   (validate! program)
   (if (= 3 version)
@@ -2127,12 +2143,12 @@
         (mapv (fn [{:mir/keys [name arity instructions]}]
                 (let [virtual {:mir/version 3 :mir/target target
                                :mir/registers :virtual
-                               :mir/instructions
-                               (schedule-instructions target instructions)}
+                               :mir/instructions instructions}
                       [allocated frame-policy]
                       (if (straight-line-call-program? instructions)
                         (try
-                          [(allocate-call-live virtual) :call-live]
+                          [(schedule-program (allocate-call-live virtual))
+                           :call-live]
                           (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
                             (if (= :spill-required (:problem (ex-data error)))
                               (allocate-with-policy virtual)
