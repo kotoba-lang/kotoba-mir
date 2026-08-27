@@ -1380,6 +1380,29 @@
 
 ;; ── proportional spilling ────────────────────────────────────────────────────
 
+(def all-vreg-slot-reuse-program
+  {:gmir/version 1
+   :gmir/instructions
+   [{:gmir/op :gmir/constant :gmir/dst v0 :gmir/value 1}
+    {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 2}
+    {:gmir/op :gmir/add :gmir/dst v2 :gmir/left v0 :gmir/right v1}
+    {:gmir/op :gmir/constant :gmir/dst v3 :gmir/value 3}
+    {:gmir/op :gmir/add :gmir/dst v4 :gmir/left v2 :gmir/right v3}
+    {:gmir/op :gmir/return :gmir/value v4}]})
+
+(deftest conservative-all-vreg-reuses-dead-frame-slots
+  (doseq [target mir/targets]
+    (let [selected (mir/select-target target all-vreg-slot-reuse-program)
+          allocate-with-spills @#'kotoba.mir/allocate-with-spills
+          allocated (allocate-with-spills selected {})
+          stores (filterv #(= :mir/spill-store (:mir/op %))
+                          (:mir/instructions allocated))]
+      (is (= 2 (:mir/frame-slots allocated))
+          (str target " colors five SSA values into the two simultaneously-live slots"))
+      (is (= [0 1 0 1 0] (mapv :mir/slot stores)) target)
+      (is (= allocated (allocate-with-spills selected {})) target)
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target))))
+
 (deftest a-spill-store-sits-at-the-definition-not-where-the-register-ran-out
   ;; Four values are live across a branch, and the arms need registers the
   ;; scratch tier does not have. The point where a register runs out is inside
@@ -1525,6 +1548,22 @@
           instructions (:mir/instructions looper)]
       (is (has-back-edge? instructions) target)
       (is (= :call-live (:mir/frame-policy looper)) target)
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target))))
+
+(deftest conservative-all-vreg-colors-a-call-loop-with-cfg-liveness
+  (doseq [target mir/targets]
+    (let [selected (mir/select-target target call-and-back-edge-module)
+          function (second (:mir/functions selected))
+          virtual {:mir/version 3 :mir/target target :mir/registers :virtual
+                   :mir/instructions (:mir/instructions function)}
+          lower-phis @#'kotoba.mir/lower-phis
+          allocate-with-spills @#'kotoba.mir/allocate-with-spills
+          {:keys [program merge-dst-by-slot]} (lower-phis virtual)
+          allocated (allocate-with-spills program merge-dst-by-slot)]
+      (is (= 4 (:mir/frame-slots allocated))
+          (str target " colors eight loop SSA values into four live slots"))
+      (is (= allocated (allocate-with-spills program merge-dst-by-slot)) target)
+      (is (has-back-edge? (:mir/instructions allocated)) target)
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target))))
 
 (def countdown-module

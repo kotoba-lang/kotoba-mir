@@ -83,6 +83,17 @@ into all-vreg.
 Physical functions produced this way declare `:call-live`. `:all-vregs`
 remains the fallback.
 
+The fallback no longer assigns one frame slot to every SSA definition.
+Fixed-point CFG liveness builds a deterministic interference graph, and a
+lowest-available greedy coloring lets values in disjoint live ranges reuse a
+slot. Lowered phi destinations are treated as definitions on each incoming
+edge and as slot uses at the join, so mutually exclusive arms may share while
+values simultaneously live around a join or back edge may not. Applying the
+fallback in the allocation test to the separately executed call+loop corpus
+colors eight SSA definitions into four slots on both target profiles. This
+reduces addressable frame footprint; it does not remove spill instructions or
+change the scanner's register policy.
+
 `last-uses` records only the highest instruction *index* at which a vreg is
 a source. It reads no label and no branch target. Two holes followed from
 routing control flow through that:
@@ -118,4 +129,4 @@ suite.
 (`:call-live`). A prefix-argument terminating call+loop completes it.
 Straight-line ADR 0006 still stores every live-across value. Neither is
 withdrawn by closing the miscompile. Leftover pressure still falls back
-to all-vreg.
+to all-vreg, whose frame slots are now CFG-live-range colored.

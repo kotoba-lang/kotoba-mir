@@ -1641,9 +1641,9 @@
                                 (if used-temp? 1 0))
             :mir/instructions out}))))))
 
-(defn- spill-slots [instructions offset]
-  (:slots
-   (reduce (fn [{:keys [slots defined] :as state}
+(defn- validate-ssa-definition-order [instructions]
+  (:ordered
+   (reduce (fn [{:keys [defined ordered] :as state}
                 {:mir/keys [dst] :as instruction}]
              (doseq [source (filter gmir/vreg? (sources instruction))]
                (when-not (contains? defined source)
@@ -1652,16 +1652,116 @@
                (do
                  (when (contains? defined dst)
                    (reject! :multiple-definition instruction))
-                 {:slots (assoc slots dst (+ offset (count slots)))
-                  :defined (conj defined dst)})
+                 {:defined (conj defined dst) :ordered (conj ordered dst)})
                state))
-           {:slots {} :defined #{}}
+           {:defined #{} :ordered []}
            instructions)))
+
+(defn- slot-sources
+  "Values whose frame contents are read by INSTRUCTION. A lowered merge-load
+  is a slot use: the value was written on each incoming edge, not defined at
+  the join."
+  [instruction]
+  (if (= :mir/merge-load (:mir/op instruction))
+    [(:mir/dst instruction)]
+    (filter gmir/vreg? (sources instruction))))
+
+(defn- slot-definition
+  "The frame value defined by INSTRUCTION. A merge-store defines the phi
+  destination on its edge; the later merge-load only materializes that slot."
+  [instruction merge-dst-by-slot]
+  (case (:mir/op instruction)
+    :mir/merge-store (get merge-dst-by-slot (:mir/slot instruction))
+    :mir/merge-load nil
+    (instruction-def instruction)))
+
+(defn- slot-block-use-def [instructions blocks merge-dst-by-slot]
+  (mapv (fn [{:keys [start end]}]
+          (reduce (fn [{:keys [uses defs]} index]
+                    (let [instruction (nth instructions index)
+                          read (remove defs (slot-sources instruction))
+                          definition (slot-definition instruction merge-dst-by-slot)]
+                      {:uses (into uses read)
+                       :defs (cond-> defs (gmir/vreg? definition)
+                               (conj definition))}))
+                  {:uses #{} :defs #{}}
+                  (range start (inc end))))
+        blocks))
+
+(defn- slot-liveness [instructions merge-dst-by-slot]
+  (let [blocks (basic-blocks instructions)
+        label->block (label-block-indexes instructions blocks)
+        successors (block-successors instructions blocks label->block)
+        use-def (slot-block-use-def instructions blocks merge-dst-by-slot)
+        block-count (count blocks)
+        empty (vec (repeat block-count #{}))]
+    (loop [live-in empty live-out empty]
+      (let [next-out (mapv (fn [block-index]
+                             (reduce into #{}
+                                     (map #(nth live-in %)
+                                          (nth successors block-index))))
+                           (range block-count))
+            next-in (mapv (fn [block-index]
+                            (let [{:keys [uses defs]} (nth use-def block-index)]
+                              (into uses (remove defs (nth next-out block-index)))))
+                          (range block-count))]
+        (if (and (= next-in live-in) (= next-out live-out))
+          {:blocks blocks :live-in next-in :live-out next-out}
+          (recur next-in next-out))))))
+
+(defn- add-interference [graph definition live]
+  (if-not (gmir/vreg? definition)
+    graph
+    (reduce (fn [out value]
+              (if (= definition value)
+                out
+                (-> out
+                    (update definition (fnil conj #{}) value)
+                    (update value (fnil conj #{}) definition))))
+            (update graph definition (fnil identity #{}))
+            live)))
+
+(defn- spill-interference
+  "Build conservative SSA frame-slot interference from fixed-point CFG
+  liveness. Mutually exclusive branch values may share a slot; values live
+  together at a join or around a back edge may not."
+  [instructions merge-dst-by-slot]
+  (let [{:keys [blocks live-out]} (slot-liveness instructions merge-dst-by-slot)]
+    (reduce
+     (fn [graph block-index]
+       (let [{:keys [start end]} (nth blocks block-index)]
+         (:graph
+          (reduce
+           (fn [{:keys [graph live]} index]
+             (let [instruction (nth instructions index)
+                   definition (slot-definition instruction merge-dst-by-slot)
+                   graph (add-interference graph definition live)
+                   live (into (cond-> live (gmir/vreg? definition)
+                               (disj definition))
+                              (slot-sources instruction))]
+               {:graph graph :live live}))
+           {:graph graph :live (nth live-out block-index)}
+           (range end (dec start) -1)))))
+     {}
+     (range (count blocks)))))
+
+(defn- spill-slots [instructions offset merge-dst-by-slot]
+  (let [ordered (validate-ssa-definition-order instructions)
+        interference (spill-interference instructions merge-dst-by-slot)]
+    (reduce (fn [slots value]
+              (let [unavailable (into #{} (keep slots)
+                                      (get interference value))
+                    slot (first (remove unavailable (range offset 4096)))]
+                (when-not slot
+                  (reject! :spill-frame-too-large {:frame-slots 4096}))
+                (assoc slots value slot)))
+            {}
+            ordered)))
 
 (defn- allocate-with-spills
   [{:mir/keys [version target instructions] :as program} merge-dst-by-slot]
-  (let [slots (spill-slots instructions 0)
-        slot-count (count slots)
+  (let [slots (spill-slots instructions 0 merge-dst-by-slot)
+        slot-count (if (seq slots) (inc (apply max (vals slots))) 0)
         [r0 r1 r2 r3] (get physical-registers target)
         argument-registers (get call-argument-registers target)]
     (when (> slot-count 4095)
