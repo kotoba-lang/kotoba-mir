@@ -9,6 +9,7 @@
             :call-clobbers :caller-saved
             :live-across-preference :preserved-tier
             :spill-placement :at-definition
+            :fallback-slot-policy :cfg-live-range-coloring
             :reload-at-block-entry :backed-values
             :back-edge :call-live
             :loops-with-calls :call-live}
@@ -87,8 +88,12 @@
                                    :evidence "amu execution of the scanner path (iterations 25-27)"}}
  ;; failed. :cfg-liveness is true: last-uses are CFG-backed (2026-08-26).
  ;; :cfg-dominator-tree is true: dominator sets + immediate dominators (2026-08-26).
+ ;; :spill-slot-coloring is true for the conservative all-vreg fallback
+ ;; (2026-08-27): fixed-point CFG liveness colors non-interfering SSA values
+ ;; onto the lowest available deterministic frame slot. The call+loop corpus
+ ;; colors eight definitions into four slots on both target profiles.
  :claims {:cfg-liveness true
           :cfg-dominator-tree true
-          :spill-slot-coloring false
+          :spill-slot-coloring true
           :rust-performance-parity false
           :llvm-beaten false}}
