@@ -639,22 +639,56 @@
                                                    (nth instructions ready))))
                      (conj out (nth instructions ready))))))))))
 
+(defn- aarch64-fusion-pair?
+  "True when INDEX and INDEX+1 are an already-adjacent multiply/add pair the
+  downstream AArch64 selector can turn into one MADD/MSUB. Keep such pairs
+  fixed: separating them would regress code quality before MC fusion runs."
+  [instructions use-counts index]
+  (let [multiply (nth instructions index nil)
+        consumer (nth instructions (inc index) nil)
+        product (:mir/dst multiply)
+        consumer-op (:mir/op consumer)
+        consumes-product?
+        (or (and (= :mir/add consumer-op)
+                 (contains? #{(:mir/left consumer) (:mir/right consumer)} product))
+            (and (= :mir/subtract consumer-op)
+                 (= product (:mir/right consumer))))]
+    (and (= :mir/multiply (:mir/op multiply))
+         (gmir/vreg? product)
+         (= 1 (get use-counts product))
+         consumes-product?)))
+
+(defn- protected-scheduling-indexes [target instructions]
+  (if-not (= :aarch64 target)
+    #{}
+    (let [use-counts (frequencies (filter gmir/vreg?
+                                          (mapcat instruction-sources instructions)))]
+      (reduce (fn [out index]
+                (if (aarch64-fusion-pair? instructions use-counts index)
+                  (conj out index (inc index))
+                  out))
+              #{}
+              (range (max 0 (dec (count instructions))))))))
+
 (defn- schedule-instructions
   "Schedule only consecutive pure integer segments. Barriers retain their
   exact position relative to all surrounding segments."
   [target instructions]
-  (letfn [(flush-segment [out segment]
-            (into out (schedule-integer-segment target segment)))]
-    (let [{:keys [out segment]}
+  (let [protected (protected-scheduling-indexes target instructions)]
+    (letfn [(flush-segment [out segment]
+              (into out (schedule-integer-segment target segment)))]
+      (let [{:keys [out segment]}
           (reduce (fn [{:keys [out segment]} instruction]
-                    (if (contains? schedulable-integer-operations
-                                   (:mir/op instruction))
+                    (let [index (+ (count out) (count segment))]
+                      (if (and (not (contains? protected index))
+                               (contains? schedulable-integer-operations
+                                          (:mir/op instruction)))
                       {:out out :segment (conj segment instruction)}
                       {:out (conj (flush-segment out segment) instruction)
-                       :segment []}))
+                       :segment []})))
                   {:out [] :segment []}
                   instructions)]
-      (flush-segment out segment))))
+        (flush-segment out segment)))))
 
 (defn- schedule-program [{:mir/keys [target] :as program}]
   (update program :mir/instructions #(schedule-instructions target %)))
