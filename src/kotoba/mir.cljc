@@ -1142,7 +1142,13 @@
   (mapv (fn [{:keys [start end]}]
           (reduce (fn [{:keys [uses defs]} index]
                     (let [instruction (nth instructions index)]
-                      {:uses (into uses (filter gmir/vreg? (sources instruction)))
+                      ;; Only reads before a local definition are live-in.
+                      ;; Counting later reads makes loop-local temporaries look
+                      ;; live across the back edge and lengthens their lifetime
+                      ;; to the latch.
+                      {:uses (into uses (remove defs
+                                                (filter gmir/vreg?
+                                                        (sources instruction))))
                        :defs (if-let [definition (instruction-def instruction)]
                                (conj defs definition)
                                defs)}))
