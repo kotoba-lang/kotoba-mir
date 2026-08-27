@@ -1557,6 +1557,69 @@
                              mir/allocate-registers))]
       (is (empty? (mir/saved-registers target instructions)) target))))
 
+(deftest call-capable-expiration-preserves-register-tier-classification
+  ;; A callee-saved register released by a crossing value must remain reserve.
+  ;; Putting it on the scratch list makes a later short-lived value incur an
+  ;; otherwise avoidable prologue/epilogue save pair.
+  (let [expire-in-pool @#'kotoba.mir/expire-assigned-in-pool]
+    (doseq [target mir/targets]
+      (let [scratch (first (get mir/physical-registers target))
+            preserved (first (get mir/preserved-registers target))
+            assigned {v0 scratch v1 preserved}
+            state {:assigned assigned
+                   :free (vec (remove #{scratch preserved}
+                                      (get mir/physical-registers target)))
+                   :reserve (vec (remove #{preserved}
+                                         (get mir/preserved-registers target)))}
+            after-preserved (expire-in-pool target state [v1])
+            after-both (expire-in-pool target after-preserved [v0])]
+        (is (not (some #{preserved} (:free after-preserved))) target)
+        (is (some #{preserved} (:reserve after-preserved)) target)
+        (is (some #{scratch} (:free after-both)) target)
+        (is (not (some #{scratch} (:reserve after-both))) target)))))
+
+(deftest sequential-call-crossings-reuse-one-preserved-register
+  ;; The first value crossing a call dies before the second crossing value is
+  ;; defined. Its callee-saved register must return to reserve; otherwise the
+  ;; second value consumes another callee-saved register and adds an avoidable
+  ;; prologue/epilogue save pair. The label selects the CFG-capable allocator.
+  (let [[a call-one result-one b call-two result-two]
+        (mapv gmir/vreg (range 6))
+        module {:gmir/version 3
+                :gmir/entry 'main
+                :gmir/functions
+                [{:gmir/name 'identity :gmir/arity 0
+                  :gmir/instructions
+                  [{:gmir/op :gmir/constant :gmir/dst (gmir/vreg 20)
+                    :gmir/value 1}
+                   {:gmir/op :gmir/return :gmir/value (gmir/vreg 20)}]}
+                 {:gmir/name 'main :gmir/arity 0
+                  :gmir/instructions
+                  [{:gmir/op :gmir/label :gmir/id :test.label/entry}
+                   {:gmir/op :gmir/constant :gmir/dst a :gmir/value 40}
+                   {:gmir/op :gmir/call :gmir/dst call-one
+                    :gmir/callee 'identity :gmir/arguments []}
+                   {:gmir/op :gmir/add :gmir/dst result-one
+                    :gmir/left a :gmir/right call-one}
+                   {:gmir/op :gmir/constant :gmir/dst b :gmir/value 50}
+                   {:gmir/op :gmir/call :gmir/dst call-two
+                    :gmir/callee 'identity :gmir/arguments []}
+                   {:gmir/op :gmir/add :gmir/dst result-two
+                    :gmir/left b :gmir/right call-two}
+                   {:gmir/op :gmir/return :gmir/value result-two}]}]}]
+    (doseq [target mir/targets]
+      (let [function (->> module
+                          (mir/select-target target)
+                          mir/allocate-registers
+                          :mir/functions
+                          second)
+            instructions (:mir/instructions function)]
+        (is (= :call-live (:mir/frame-policy function)) target)
+        (is (= 1 (count (mir/saved-registers target instructions))) target)
+        (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
+                                  (:mir/op %))
+                      instructions) target)))))
+
 (defn- simultaneous-live-sum
   "N independent constants, all live, then a left-fold so the last definition
   is the peak. One past the pool must spill; the pool itself must not."

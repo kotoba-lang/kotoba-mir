@@ -1293,6 +1293,27 @@
     {:free (vec (remove owned (take scratch-count pool)))
      :reserve (vec (remove owned (drop scratch-count pool)))}))
 
+(defn- expire-assigned-in-pool
+  "Expire VALUES and restore the allocator's scratch/reserve partition.
+
+  `expire-assigned` deliberately knows nothing about target register classes.
+  Call-capable allocation must reclassify released preserved registers instead
+  of appending them to the scratch list. Previously-used preserved registers go
+  to the front of reserve: reusing one costs no additional frame save, while
+  consuming a never-used preserved register adds a save/restore pair."
+  [target state values]
+  (let [assigned (:assigned state)
+        remaining (apply dissoc assigned values)
+        still-owned (set (vals remaining))
+        released (vec (remove still-owned (map assigned (ordered-vregs values))))
+        scratch? (set (get physical-registers target))
+        state (expire-assigned state values)]
+    (-> state
+        (update :free (fn [free]
+                        (into (vec (remove (set released) free))
+                              (filter scratch? released))))
+        (update :reserve #(into (vec (remove scratch? released)) %)))))
+
 (defn- drop-backed-assignments
   "A reload in one arm does not satisfy a use in another. Values that already
   have a slot are dropped from the assignment at every label so the next use
@@ -1431,7 +1452,7 @@
                                            (and (= just-defined %)
                                                 (not (contains? last-use %))))
                                       (keys (:assigned state)))]
-                  (expire-assigned state expired)))
+                  (expire-assigned-in-pool target state expired)))
             (ensure-source [state instruction value]
               (if (contains? (:assigned state) value)
                 state
@@ -1536,6 +1557,7 @@
                        state (update state :out conj allocated)]
                    (expire state index dst))))
              {:assigned (:assigned entry) :free (:free entry)
+              :reserve (:reserve entry)
               :materialized (set (keys (:entry-spills entry)))
               :used-temp? (:used-temp? entry) :out (:instructions entry)}
              (map-indexed (fn [offset instruction]
@@ -1726,9 +1748,7 @@
                             state)
                     expired (filter #(= index (get last-use %))
                                     (keys (:assigned state)))
-                    state (expire-assigned state expired)
-                    lists (rebuild-pool-lists target pool (:assigned state))
-                    state (assoc state :free (:free lists) :reserve (:reserve lists))]
+                    state (expire-assigned-in-pool target state expired)]
                 (if (gmir/vreg? dst)
                   (assoc-in state [:def-position dst] (count (:out state)))
                   state)))]
@@ -1864,9 +1884,17 @@
                                          (and (= dst %)
                                               (not (contains? last-use %))))
                                     (keys assigned))
-                    state (expire-assigned {:assigned assigned :free free} expired)]
+                    state (if calls?
+                            (expire-assigned-in-pool
+                             target
+                             {:assigned assigned :free free :reserve reserve}
+                             expired)
+                            (expire-assigned
+                             {:assigned assigned :free free}
+                             expired))]
                 (recur (inc index) (next remaining)
-                       (:assigned state) (vec (:free state)) reserve
+                       (:assigned state) (vec (:free state))
+                       (if calls? (:reserve state) reserve)
                        backed next-slot
                        (conj out allocated) used-temp? temp-slot
                        (if (gmir/vreg? dst)
