@@ -1895,3 +1895,38 @@
     (is (= #{0 2} (nth dominators 2)))
     (is (= 0 (nth immediate-dominators 1)))
     (is (= 0 (nth immediate-dominators 2)))))
+
+(deftest cfg-liveness-does-not-carry-loop-local-temporaries-over-the-back-edge
+  ;; Each constant and sum is defined and consumed inside the loop block. A
+  ;; use-set that includes reads after a local definition falsely carries all
+  ;; thirty values through the self edge. Before the fix that pressure created
+  ;; 12 x86-64 frame slots and 3 AArch64 slots.
+  (let [values (mapv gmir/vreg (range 30))
+        triples (partition 3 values)
+        body (mapcat (fn [index [left right sum]]
+                       [{:gmir/op :gmir/constant :gmir/dst left
+                         :gmir/value index}
+                        {:gmir/op :gmir/constant :gmir/dst right
+                         :gmir/value (inc index)}
+                        {:gmir/op :gmir/add :gmir/dst sum
+                         :gmir/left left :gmir/right right}])
+                     (range)
+                     triples)
+        program {:gmir/version 2
+                 :gmir/instructions
+                 (vec (concat [{:gmir/op :gmir/label
+                                :gmir/id :test.label/header}]
+                              body
+                              [{:gmir/op :gmir/jump
+                                :gmir/target :test.label/header}]))}]
+    (doseq [target mir/targets]
+      (let [allocated (->> program
+                           (mir/select-target target)
+                           mir/allocate-registers)]
+        (is (zero? (:mir/frame-slots allocated)) target)
+        (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
+                                  (:mir/op %))
+                      (:mir/instructions allocated)) target)
+        (is (= allocated
+               (->> program (mir/select-target target) mir/allocate-registers))
+            target)))))
