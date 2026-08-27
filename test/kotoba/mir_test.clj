@@ -74,6 +74,19 @@
         (is (= barrier (nth scheduled 1)) [target barrier-op])
         (is (= (count instructions) (count scheduled)) [target barrier-op])))))
 
+(deftest aarch64-scheduling-preserves-existing-fused-multiply-candidates
+  (let [schedule @#'kotoba.mir/schedule-instructions
+        [a b c d product fused independent result] (map gmir/vreg (range 8))
+        instructions
+        [{:mir/op :mir/multiply :mir/dst product :mir/left a :mir/right b}
+         {:mir/op :mir/add :mir/dst fused :mir/left product :mir/right c}
+         {:mir/op :mir/add :mir/dst independent :mir/left c :mir/right d}
+         {:mir/op :mir/add :mir/dst result :mir/left fused
+          :mir/right independent}]
+        scheduled (schedule :aarch64 instructions)]
+    (is (= [product fused independent result] (mapv :mir/dst scheduled)))
+    (is (= scheduled (schedule :aarch64 instructions)))))
+
 (deftest allocated-aarch64-admits-canonical-fused-multiply-operations
   (let [base {:mir/version 1 :mir/target :aarch64 :mir/registers :physical
               :mir/frame-slots 0}

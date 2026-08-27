@@ -11,6 +11,10 @@ dependencies. It prefers the longest remaining modeled dependency path, then
 the original instruction position. A conceptual issue cycle allows independent
 work to fill a modeled multiply dependency gap.
 
+An already-adjacent, single-use AArch64 multiply-add/subtract candidate is also
+a barrier pair. The downstream MC selector can fuse it to MADD/MSUB only while
+it remains adjacent, so local scheduling must not separate it.
+
 The per-target latency tables are conservative compiler heuristics, not
 microarchitecture measurements. This ADR therefore qualifies deterministic
 instruction scheduling, but does not claim a runtime speed improvement. Native

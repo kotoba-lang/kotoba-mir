@@ -6,6 +6,7 @@
                         :memory :calls :phi :labels :branches :returns
                         :target-selected-operations}
             :dependency-order :preserved
+            :aarch64-fusion-candidates :fixed-barriers
             :selection [:critical-path-height :original-index]
             :deterministic true
             :targets #{:x86-64 :aarch64}}
