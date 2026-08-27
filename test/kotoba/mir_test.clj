@@ -87,7 +87,7 @@
     (is (= [product fused independent result] (mapv :mir/dst scheduled)))
     (is (= scheduled (schedule :aarch64 instructions)))))
 
-(deftest control-flow-functions-remain-unscheduled
+(deftest per-basic-block-scheduling-reorders-only-within-barrier-bounded-segments
   (let [schedule @#'kotoba.mir/schedule-instructions
         [a b c d x dependent independent] (map gmir/vreg (range 7))
         instructions
@@ -96,9 +96,78 @@
          {:mir/op :mir/add :mir/dst independent :mir/left c :mir/right d}
          {:mir/op :mir/branch-zero :mir/test independent :mir/target :done}
          {:mir/op :mir/label :mir/id :done}
-         {:mir/op :mir/return :mir/value dependent}]]
+         {:mir/op :mir/return :mir/value dependent}]
+        expected-pre-branch [x independent dependent]]
     (doseq [target mir/targets]
-      (is (= instructions (schedule target instructions)) target))))
+      (let [scheduled (schedule target instructions)]
+        (is (= expected-pre-branch (mapv :mir/dst (subvec scheduled 0 3))) target)
+        (is (= (subvec instructions 3) (subvec scheduled 3)) target)))))
+
+(deftest scheduling-after-allocation-keeps-spill-stores-at-definitions
+  (with-scratch-tier-only
+    (let [[a b c d x1 x2 x3 then-y else-y join result] (map gmir/vreg (range 11))
+          program
+          {:gmir/version 2
+           :gmir/instructions
+           [{:gmir/op :gmir/constant :gmir/dst a :gmir/value 1}
+            {:gmir/op :gmir/constant :gmir/dst b :gmir/value 2}
+            {:gmir/op :gmir/constant :gmir/dst c :gmir/value 3}
+            {:gmir/op :gmir/constant :gmir/dst d :gmir/value 4}
+            {:gmir/op :gmir/branch-zero :gmir/test a :gmir/target :test.label/else}
+            {:gmir/op :gmir/label :gmir/id :test.label/then}
+            {:gmir/op :gmir/add :gmir/dst x1 :gmir/left c :gmir/right d}
+            {:gmir/op :gmir/add :gmir/dst x2 :gmir/left c :gmir/right d}
+            {:gmir/op :gmir/add :gmir/dst x3 :gmir/left x1 :gmir/right x2}
+            {:gmir/op :gmir/add :gmir/dst then-y :gmir/left x3 :gmir/right d}
+            {:gmir/op :gmir/label :gmir/id :test.label/then-exit}
+            {:gmir/op :gmir/jump :gmir/target :test.label/join}
+            {:gmir/op :gmir/label :gmir/id :test.label/else}
+            {:gmir/op :gmir/add :gmir/dst else-y :gmir/left b :gmir/right c}
+            {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
+            {:gmir/op :gmir/jump :gmir/target :test.label/join}
+            {:gmir/op :gmir/label :gmir/id :test.label/join}
+            {:gmir/op :gmir/phi :gmir/dst join
+             :gmir/incomings [{:gmir/predecessor :test.label/then-exit :gmir/value then-y}
+                              {:gmir/predecessor :test.label/else-exit :gmir/value else-y}]}
+            {:gmir/op :gmir/add :gmir/dst result :gmir/left join :gmir/right d}
+            {:gmir/op :gmir/return :gmir/value result}]}
+          instructions (:mir/instructions
+                        (->> program (mir/select-target :x86-64)
+                             mir/allocate-registers))
+          numbered (vec (map-indexed vector instructions))
+          stores (filter (fn [[_ i]] (= :mir/spill-store (:mir/op i))) numbered)]
+      (is (seq stores))
+      (doseq [[position store] stores]
+        (is (= (:mir/src store) (:mir/dst (nth instructions (dec position))))
+            (str "store at " position " follows its definition on CFG pressure"))))))
+
+(deftest scheduling-preserves-phi-transport-coalescing-groups
+  (let [[a b then-v else-v join] (map gmir/vreg (range 5))
+        program {:gmir/version 2
+                 :gmir/instructions
+                 [{:gmir/op :gmir/constant :gmir/dst a :gmir/value 1}
+                  {:gmir/op :gmir/constant :gmir/dst b :gmir/value 2}
+                  {:gmir/op :gmir/branch-zero :gmir/test a
+                   :gmir/target :test.label/else}
+                  {:gmir/op :gmir/label :gmir/id :test.label/then}
+                  {:gmir/op :gmir/add :gmir/dst then-v :gmir/left a :gmir/right b}
+                  {:gmir/op :gmir/label :gmir/id :test.label/then-exit}
+                  {:gmir/op :gmir/jump :gmir/target :test.label/join}
+                  {:gmir/op :gmir/label :gmir/id :test.label/else}
+                  {:gmir/op :gmir/add :gmir/dst else-v :gmir/left b :gmir/right a}
+                  {:gmir/op :gmir/label :gmir/id :test.label/else-exit}
+                  {:gmir/op :gmir/jump :gmir/target :test.label/join}
+                  {:gmir/op :gmir/label :gmir/id :test.label/join}
+                  {:gmir/op :gmir/phi :gmir/dst join
+                   :gmir/incomings
+                   [{:gmir/predecessor :test.label/then-exit :gmir/value then-v}
+                    {:gmir/predecessor :test.label/else-exit :gmir/value else-v}]}
+                  {:gmir/op :gmir/return :gmir/value join}]}
+        allocated (:mir/instructions
+                   (->> program (mir/select-target :x86-64) mir/allocate-registers))]
+    (is (not (some #(= :mir/merge-store (:mir/op %)) allocated))
+        "edge merge stores coalesce to moves on CFG programs")
+    (is (some #(= :mir/move (:mir/op %)) allocated))))
 
 (deftest allocated-aarch64-admits-canonical-fused-multiply-operations
   (let [base {:mir/version 1 :mir/target :aarch64 :mir/registers :physical

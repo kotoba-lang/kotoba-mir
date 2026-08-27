@@ -6,10 +6,15 @@ Schedule only consecutive SSA segments made from pure, non-trapping integer
 operations. All other MIR operations are hard barriers and retain their exact
 position relative to surrounding segments.
 
-This first qualified scope is straight-line functions. If a function contains
-a label, branch, jump, or phi, its complete instruction vector is unchanged.
-The existing CFG allocator has ordering-sensitive transport invariants; CFG
-scheduling remains a separate qualification step with execution evidence.
+Scheduling runs after register allocation on physical MIR. Integer segments are
+bounded by labels, branches, spills, moves, calls, and every other non-
+schedulable operation, so each basic block is scheduled independently once
+physical register identities are fixed. Pre-allocation scheduling was
+rejected for CFG functions: reordering virtual SSA before the linear scanner
+changes register reuse under spill pressure and miscompiles real programs
+(`a-value-spilled-in-one-branch-arm-survives-into-the-other` returns 1652
+instead of 282 on x86-64). Post-allocation scheduling uses last-definition
+physical register dependencies, so reordering cannot change allocation.
 
 Within a segment, a deterministic list scheduler preserves producer-consumer
 dependencies. It prefers the longest remaining modeled dependency path, then

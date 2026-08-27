@@ -2,12 +2,13 @@
  :adr/status :accepted
  :decision :latency-aware-basic-block-scheduling
  :contract {:scope :consecutive-pure-integer-ssa
-            :function-scope :straight-line-only
-            :control-flow-functions :unchanged
+            :function-scope :per-basic-block
+            :scheduling-phase :after-physical-allocation
+            :control-flow-functions :scheduled-per-block
             :barriers #{:constants :data-addresses :division :floating-point
                         :memory :calls :phi :labels :branches :returns
-                        :target-selected-operations}
-            :dependency-order :preserved
+                        :spills :moves :target-selected-operations}
+            :dependency-order :physical-register-last-definition
             :aarch64-fusion-candidates :fixed-barriers
             :selection [:critical-path-height :original-index]
             :deterministic true
