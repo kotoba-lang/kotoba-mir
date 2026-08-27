@@ -2,6 +2,8 @@
  :adr/status :accepted
  :decision :latency-aware-basic-block-scheduling
  :contract {:scope :consecutive-pure-integer-ssa
+            :function-scope :straight-line-only
+            :control-flow-functions :unchanged
             :barriers #{:constants :data-addresses :division :floating-point
                         :memory :calls :phi :labels :branches :returns
                         :target-selected-operations}

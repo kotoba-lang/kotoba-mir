@@ -6,6 +6,11 @@ Schedule only consecutive SSA segments made from pure, non-trapping integer
 operations. All other MIR operations are hard barriers and retain their exact
 position relative to surrounding segments.
 
+This first qualified scope is straight-line functions. If a function contains
+a label, branch, jump, or phi, its complete instruction vector is unchanged.
+The existing CFG allocator has ordering-sensitive transport invariants; CFG
+scheduling remains a separate qualification step with execution evidence.
+
 Within a segment, a deterministic list scheduler preserves producer-consumer
 dependencies. It prefers the longest remaining modeled dependency path, then
 the original instruction position. A conceptual issue cycle allows independent
