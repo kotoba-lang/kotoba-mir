@@ -118,6 +118,31 @@
       (is (valid? target instructions (schedule-indexes target instructions)) target))
     (is (= [0 2 1 3] scheduled-indexes))))
 
+(deftest post-allocation-scheduling-preserves-physical-register-hazards
+  (let [schedule-indexes @#'kotoba.mir/schedule-integer-segment-indices
+        valid? @#'kotoba.mir/valid-scheduled-segment?
+        [r0 r1 r2 r3 r4 r5 r6 r7] (map #(keyword "aarch64" (str "x" %))
+                                        (range 8))
+        ;; The multiply chain makes the later r0 definition attractive to the
+        ;; scheduler. It must still remain after the earlier r0 read (WAR).
+        war [{:mir/op :mir/add :mir/dst r2 :mir/left r0 :mir/right r1}
+             {:mir/op :mir/add :mir/dst r3 :mir/left r4 :mir/right r5}
+             {:mir/op :mir/multiply :mir/dst r0 :mir/left r4 :mir/right r5}
+             {:mir/op :mir/multiply :mir/dst r6 :mir/left r0 :mir/right r7}]
+        ;; The first r0 definition has no reader, but must remain before its
+        ;; replacement or it could move after it and change the final read.
+        waw [{:mir/op :mir/add :mir/dst r0 :mir/left r1 :mir/right r2}
+             {:mir/op :mir/add :mir/dst r3 :mir/left r4 :mir/right r5}
+             {:mir/op :mir/multiply :mir/dst r0 :mir/left r4 :mir/right r5}
+             {:mir/op :mir/multiply :mir/dst r6 :mir/left r0 :mir/right r7}]]
+    (doseq [instructions [war waw]]
+      (let [order (schedule-indexes :aarch64 instructions)
+            positions (zipmap order (range))]
+        (is (< (positions 0) (positions 2)) [instructions order])
+        (is (valid? :aarch64 instructions order) [instructions order])
+        (is (not (valid? :aarch64 instructions [2 0 1 3]))
+            [instructions :unsafe-order-must-be-rejected])))))
+
 (deftest integer-schedule-validation-rejects-dependency-violating-order
   (let [valid? @#'kotoba.mir/valid-scheduled-segment?
         [a b c d x dependent independent result] (map gmir/vreg (range 8))

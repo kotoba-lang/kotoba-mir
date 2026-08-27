@@ -590,24 +590,39 @@
   (or (gmir/vreg? value) (physical-register? target value)))
 
 (defn- segment-predecessors [target instructions]
-  "Last-definition register dependencies within one scheduling segment. SSA
-  vregs and reused physical registers both resolve through the most recent
-  prior definition of each source register."
+  "Register dependencies within one scheduling segment. SSA vregs need RAW
+  edges only, but post-allocation physical registers are reused: preserve WAR
+  and WAW order too, or a later definition can move before an earlier read or
+  an earlier definition can move after the value meant to replace it."
   (loop [index 0
          last-def {}
+         readers-since-def {}
          preds []]
     (if (= index (count instructions))
       preds
       (let [instruction (nth instructions index)
-            pred-indexes (->> (instruction-sources instruction)
-                              (keep last-def)
-                              set)
-            last-def (if-let [dst (:mir/dst instruction)]
-                       (if (scheduling-register? target dst)
-                         (assoc last-def dst index)
-                         last-def)
-                       last-def)]
-        (recur (inc index) last-def (conj preds pred-indexes))))))
+            sources (->> (instruction-sources instruction)
+                         (filter #(scheduling-register? target %))
+                         set)
+            dst (:mir/dst instruction)
+            register-dst? (scheduling-register? target dst)
+            raw-preds (keep last-def sources)
+            ;; Capture anti-dependencies before recording this instruction as
+            ;; a reader. A read-modify-write reads the old value and defines
+            ;; the new value atomically; it must not depend on itself.
+            war-preds (when register-dst? (get readers-since-def dst))
+            waw-pred (when register-dst? (get last-def dst))
+            pred-indexes (cond-> (into (set raw-preds) war-preds)
+                           (some? waw-pred) (conj waw-pred))
+            readers-since-def
+            (reduce #(update %1 %2 (fnil conj #{}) index)
+                    readers-since-def sources)
+            readers-since-def (if register-dst?
+                                (assoc readers-since-def dst #{})
+                                readers-since-def)
+            last-def (if register-dst? (assoc last-def dst index) last-def)]
+        (recur (inc index) last-def readers-since-def
+               (conj preds pred-indexes))))))
 
 (defn- segment-ready-at-cycle? [predecessors completion cycle index]
   (every? #(and (contains? completion %)
