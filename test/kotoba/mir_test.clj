@@ -87,6 +87,19 @@
     (is (= [product fused independent result] (mapv :mir/dst scheduled)))
     (is (= scheduled (schedule :aarch64 instructions)))))
 
+(deftest control-flow-functions-remain-unscheduled
+  (let [schedule @#'kotoba.mir/schedule-instructions
+        [a b c d x dependent independent] (map gmir/vreg (range 7))
+        instructions
+        [{:mir/op :mir/multiply :mir/dst x :mir/left a :mir/right b}
+         {:mir/op :mir/multiply :mir/dst dependent :mir/left x :mir/right c}
+         {:mir/op :mir/add :mir/dst independent :mir/left c :mir/right d}
+         {:mir/op :mir/branch-zero :mir/test independent :mir/target :done}
+         {:mir/op :mir/label :mir/id :done}
+         {:mir/op :mir/return :mir/value dependent}]]
+    (doseq [target mir/targets]
+      (is (= instructions (schedule target instructions)) target))))
+
 (deftest allocated-aarch64-admits-canonical-fused-multiply-operations
   (let [base {:mir/version 1 :mir/target :aarch64 :mir/registers :physical
               :mir/frame-slots 0}

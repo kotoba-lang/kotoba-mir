@@ -650,7 +650,8 @@
         consumer-op (:mir/op consumer)
         consumes-product?
         (or (and (= :mir/add consumer-op)
-                 (contains? #{(:mir/left consumer) (:mir/right consumer)} product))
+                 (or (= product (:mir/left consumer))
+                     (= product (:mir/right consumer))))
             (and (= :mir/subtract consumer-op)
                  (= product (:mir/right consumer))))]
     (and (= :mir/multiply (:mir/op multiply))
@@ -672,9 +673,15 @@
 
 (defn- schedule-instructions
   "Schedule only consecutive pure integer segments. Barriers retain their
-  exact position relative to all surrounding segments."
+  exact position relative to all surrounding segments. Control-flow functions
+  remain entirely unchanged until scheduling and CFG allocation share a proved
+  ordering contract."
   [target instructions]
-  (let [protected (protected-scheduling-indexes target instructions)]
+  (if (some #(contains? #{:mir/label :mir/branch-zero :mir/jump :mir/phi}
+                         (:mir/op %))
+            instructions)
+    instructions
+    (let [protected (protected-scheduling-indexes target instructions)]
     (letfn [(flush-segment [out segment]
               (into out (schedule-integer-segment target segment)))]
       (let [{:keys [out segment]}
@@ -688,7 +695,7 @@
                        :segment []})))
                   {:out [] :segment []}
                   instructions)]
-        (flush-segment out segment)))))
+        (flush-segment out segment))))))
 
 (defn- schedule-program [{:mir/keys [target] :as program}]
   (update program :mir/instructions #(schedule-instructions target %)))
