@@ -22,6 +22,14 @@
 (def v5 (gmir/vreg 5))
 (def v6 (gmir/vreg 6))
 
+(deftest physical-register-classification-rejects-integer-immediates
+  (let [physical-register? @#'kotoba.mir/physical-register?]
+    (doseq [target mir/targets]
+      (is (false? (physical-register? target 0N)) target)
+      (is (true? (physical-register? target
+                                     (first (get mir/physical-registers target))))
+          target))))
+
 (deftest latency-aware-scheduling-fills-an-integer-multiply-dependency-gap
   (let [schedule @#'kotoba.mir/schedule-instructions
         [a b c d x independent dependent result] (map gmir/vreg (range 8))

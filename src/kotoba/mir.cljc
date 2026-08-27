@@ -190,11 +190,16 @@
     #{}))
 
 (defn- physical-register? [target value]
-  (contains? (set (concat (get physical-registers target)
-                          (get leaf-registers target)
-                          (get preserved-registers target)
-                          (get call-argument-registers target)))
-             value))
+  ;; Physical registers are namespaced keywords. Guard that closed type before
+  ;; asking a hash set about VALUE: nbb cannot hash a JavaScript BigInt
+  ;; primitive (it attempts to attach a closure uid), and integer immediates
+  ;; legitimately flow through instruction-sources beside registers.
+  (and (keyword? value)
+       (contains? (set (concat (get physical-registers target)
+                               (get leaf-registers target)
+                               (get preserved-registers target)
+                               (get call-argument-registers target)))
+                  value)))
 
 (defn- call-operation? [op]
   (contains? #{:mir/call :mir/tail-call :mir/runtime-call
