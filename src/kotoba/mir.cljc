@@ -566,6 +566,99 @@
           (when (vector? (:mir/arguments instruction))
             (:mir/arguments instruction))))
 
+(def ^:private schedulable-integer-operations
+  "Pure, non-trapping integer operations admitted to local scheduling. Every
+  other operation is a hard barrier: in particular constants, memory, calls,
+  division, labels, terminators, phi transport, and target-selected ops."
+  #{:mir/add :mir/subtract :mir/multiply
+    :mir/bit-and :mir/bit-or :mir/bit-xor
+    :mir/shift-left :mir/shift-right-signed :mir/shift-right-unsigned
+    :mir/equal :mir/less-than :mir/greater-than
+    :mir/less-or-equal :mir/greater-or-equal})
+
+(def ^:private scheduling-latencies
+  "Portable scheduling heuristic, not a microarchitecture benchmark. The
+  target key keeps policy explicit as the profiles diverge; both current
+  profiles conservatively model integer multiply as the only multi-cycle op."
+  {:x86-64 {:mir/multiply 3}
+   :aarch64 {:mir/multiply 3}})
+
+(defn- scheduling-latency [target instruction]
+  (get-in scheduling-latencies [target (:mir/op instruction)] 1))
+
+(defn- schedule-integer-segment
+  "Deterministic dependency-aware list scheduling for one barrier-free SSA
+  segment. Critical-path height breaks ties first, original position second.
+  A conceptual issue cycle lets independent work fill modeled dependency
+  latency without inserting machine instructions or claiming wall-clock gain."
+  [target instructions]
+  (if (< (count instructions) 2)
+    instructions
+    (let [definition-index
+          (reduce-kv (fn [out index {:mir/keys [dst]}]
+                       (cond-> out (gmir/vreg? dst) (assoc dst index)))
+                     {} instructions)
+          predecessors
+          (mapv (fn [instruction]
+                  (->> (instruction-sources instruction)
+                       (keep definition-index)
+                       set))
+                instructions)
+          successors
+          (reduce-kv (fn [out index inputs]
+                       (reduce #(update %1 %2 conj index) out inputs))
+                     (vec (repeat (count instructions) #{}))
+                     predecessors)
+          heights
+          (reduce (fn [out index]
+                    (assoc out index
+                           (+ (scheduling-latency target (nth instructions index))
+                              (reduce max 0 (map #(nth out %) (nth successors index))))))
+                  (vec (repeat (count instructions) 0))
+                  (reverse (range (count instructions))))]
+      (loop [cycle 0
+             remaining (set (range (count instructions)))
+             completion {}
+             out []]
+        (if (empty? remaining)
+          out
+          (let [ready (->> remaining
+                           (filter (fn [index]
+                                     (every? #(and (contains? completion %)
+                                                   (<= (get completion %) cycle))
+                                             (nth predecessors index))))
+                           (sort-by (fn [index] [(- (nth heights index)) index]))
+                           first)]
+            (if (nil? ready)
+              (recur (inc cycle) remaining completion out)
+              (recur (inc cycle)
+                     (disj remaining ready)
+                     (assoc completion ready
+                            (+ cycle
+                               (scheduling-latency target
+                                                   (nth instructions ready))))
+                     (conj out (nth instructions ready))))))))))
+
+(defn- schedule-instructions
+  "Schedule only consecutive pure integer segments. Barriers retain their
+  exact position relative to all surrounding segments."
+  [target instructions]
+  (letfn [(flush-segment [out segment]
+            (into out (schedule-integer-segment target segment)))]
+    (let [{:keys [out segment]}
+          (reduce (fn [{:keys [out segment]} instruction]
+                    (if (contains? schedulable-integer-operations
+                                   (:mir/op instruction))
+                      {:out out :segment (conj segment instruction)}
+                      {:out (conj (flush-segment out segment) instruction)
+                       :segment []}))
+                  {:out [] :segment []}
+                  instructions)]
+      (flush-segment out segment))))
+
+(defn- schedule-program [{:mir/keys [target] :as program}]
+  (update program :mir/instructions #(schedule-instructions target %)))
+
 (defn- select-instructions
   "Select one function while retaining SSA constants long enough to choose a
   target-independent constant-divisor operation. A divisor vreg disappears
@@ -1967,7 +2060,7 @@
   live-across values in the preserved tier; leftover pressure still takes
   the conservative all-vreg path."
   [program]
-  (first (allocate-with-policy program)))
+  (first (allocate-with-policy (schedule-program program))))
 
 (defn allocate-registers
   "Allocate a legacy flat program or every function in a v3 module. A function
@@ -1993,7 +2086,8 @@
         (mapv (fn [{:mir/keys [name arity instructions]}]
                 (let [virtual {:mir/version 3 :mir/target target
                                :mir/registers :virtual
-                               :mir/instructions instructions}
+                               :mir/instructions
+                               (schedule-instructions target instructions)}
                       [allocated frame-policy]
                       (if (straight-line-call-program? instructions)
                         (try
