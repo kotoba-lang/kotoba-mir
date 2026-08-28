@@ -1276,6 +1276,37 @@
         (is (not-any? #(contains? #{:mir/reentry :mir/recur} (:mir/op %))
                       (:mir/instructions function)))))))
 
+(deftest direct-reentry-boundary-follows-complete-home-materialization
+  (let [arguments [{:mir/op :mir/argument :mir/dst :aarch64/x0 :mir/index 0}
+                   {:mir/op :mir/argument :mir/dst :aarch64/x1 :mir/index 1}]
+        moves [{:mir/op :mir/move :mir/dst :aarch64/x19 :mir/src :aarch64/x0}
+               {:mir/op :mir/move :mir/dst :aarch64/x20 :mir/src :aarch64/x1}]
+        boundary {:mir/op :mir/reentry
+                  :mir/parameters [:aarch64/x19 :aarch64/x20]}
+        recur {:mir/op :mir/recur
+               :mir/arguments [:aarch64/x19 :aarch64/x20]}
+        module (fn [instructions]
+                 {:mir/version 3 :mir/target :aarch64 :mir/registers :physical
+                  :mir/entry 'loop
+                  :mir/functions
+                  [{:mir/name 'loop :mir/arity 2 :mir/frame-slots 0
+                    :mir/frame-policy :call-live
+                    :mir/instructions (vec instructions)}]})]
+    (is (= (module (concat arguments moves [boundary recur]))
+           (mir/validate! (module (concat arguments moves [boundary recur])))))
+    (doseq [[why instructions]
+            [["before arguments" (concat [boundary] arguments moves [recur])]
+             ["before home moves" (concat arguments [boundary] moves [recur])]
+             ["one home missing" (concat arguments (take 1 moves) [boundary recur])]
+             ["home contains the other parameter"
+              (concat arguments moves
+                      [(assoc boundary :mir/parameters
+                              [:aarch64/x20 :aarch64/x19])
+                       (assoc recur :mir/arguments
+                              [:aarch64/x20 :aarch64/x19])])]]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (mir/validate! (module instructions))) why))))
+
 (deftest v3-fifth-call-argument-is-loaded-directly-from-one-entry-slot
   (with-scratch-tier-only
     (let [args (mapv gmir/vreg (range 5))

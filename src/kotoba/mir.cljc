@@ -429,6 +429,49 @@
                 instructions)}))))
   program)
 
+(defn- valid-direct-reentry-prefix?
+  "The reentry marker is meaningful only after the public ABI arguments have
+  been materialized into the homes it names. Symbolically execute the closed
+  entry transport language so malformed external MIR cannot place the marker
+  before a required move (or name a home containing another parameter)."
+  [target arity instructions reentry-index parameters]
+  (let [abi (subvec (get call-argument-registers target) 0 arity)
+        argument-prefix (subvec instructions 0 (min arity (count instructions)))
+        canonical-arguments?
+        (and (= arity (count argument-prefix))
+             (= (vec (range arity)) (mapv :mir/index argument-prefix))
+             (= abi (mapv :mir/dst argument-prefix))
+             (every? #(= :mir/argument (:mir/op %)) argument-prefix))]
+    (when (and canonical-arguments? (<= arity reentry-index))
+      (let [initial {:registers (zipmap abi (range arity)) :slots {}}
+            result
+            (reduce
+             (fn [state {:mir/keys [op dst src slot]}]
+               (if (= ::invalid state)
+                 (reduced state)
+                 (case op
+                   :mir/move
+                   (if (contains? (:registers state) src)
+                     (assoc-in state [:registers dst] (get-in state [:registers src]))
+                     (reduced ::invalid))
+
+                   :mir/spill-store
+                   (if (contains? (:registers state) src)
+                     (assoc-in state [:slots slot] (get-in state [:registers src]))
+                     (reduced ::invalid))
+
+                   :mir/spill-load
+                   (if (contains? (:slots state) slot)
+                     (assoc-in state [:registers dst] (get-in state [:slots slot]))
+                     (reduced ::invalid))
+
+                   (reduced ::invalid))))
+             initial
+             (subvec instructions arity reentry-index))]
+        (and (not= ::invalid result)
+             (= (vec (range arity))
+                (mapv #(get-in result [:registers %]) parameters)))))))
+
 (defn- validate-v3-module!
   [{:mir/keys [target registers entry functions] :as module}]
   (when-not (and (= #{:mir/version :mir/target :mir/registers
@@ -484,11 +527,17 @@
           (reject! :call-frame-policy-violation function))
         (when (= :physical registers)
           (let [reentries (filterv #(= :mir/reentry (:mir/op %)) instructions)
-                recurs (filterv #(= :mir/recur (:mir/op %)) instructions)]
+                recurs (filterv #(= :mir/recur (:mir/op %)) instructions)
+                reentry-index (first (keep-indexed
+                                      #(when (= :mir/reentry (:mir/op %2)) %1)
+                                      instructions))]
             (when-not (if (seq recurs)
                         (and (= :aarch64 target)
                              (= 1 (count reentries))
                              (= arity (count (:mir/parameters (first reentries))))
+                             (valid-direct-reentry-prefix?
+                              target arity instructions reentry-index
+                              (:mir/parameters (first reentries)))
                              (every? #(= (:mir/parameters (first reentries))
                                          (:mir/arguments %))
                                      recurs))
