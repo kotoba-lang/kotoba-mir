@@ -905,7 +905,7 @@
         {:gmir/predecessor :test.label/else-exit :gmir/value v4}]}
       {:gmir/op :gmir/return :gmir/value v5}]}]})
 
-(deftest v3-else-arm-reloads-a-value-the-then-arm-already-reloaded
+(deftest v3-preserved-entry-value-is-valid-in-either-successor
   (doseq [target mir/targets]
     (let [allocated (->> count-down-reload-module
                          (mir/select-target target)
@@ -916,10 +916,11 @@
           add (first (filter #(= :mir/add (:mir/op %)) else))]
       (is (= :call-live (:mir/frame-policy caller)) target)
       (is (some? add) target)
-      (is (some #(and (= :mir/spill-load (:mir/op %))
-                      (= (:mir/dst %) (:mir/left add)))
-                else)
-          (str target " else arm reloads acc; a then-arm reload does not keep it assigned"))
+      (is (contains? (set (get mir/preserved-registers target)) (:mir/left add))
+          (str target " keeps the call-crossing entry value in a callee-saved register"))
+      (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load} (:mir/op %))
+                    instructions)
+          (str target " does not materialize a slot for a preserved entry value"))
       (is (seq (value-ops-unbacked-by-store instructions))
           (str target " must not fall back to all-vreg"))
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target))))
@@ -1011,6 +1012,63 @@
         (is (= 'add-one (:mir/callee tail)) target)
         (is (= [(first (get mir/call-argument-registers target))]
                (:mir/arguments tail)) target)))))
+
+(deftest v3-live-entry-arguments-start-in-preserved-registers
+  ;; This is the scalar shape produced for loop/recur with a real call in the
+  ;; body.  `i` and `acc` enter in ABI registers but survive `id`; assigning
+  ;; them scratch-first would store and reload both values on every iteration.
+  (let [i (gmir/vreg 0)
+        acc (gmir/vreg 1)
+        zero (gmir/vreg 2)
+        done? (gmir/vreg 3)
+        call-one (gmir/vreg 4)
+        stepped (gmir/vreg 5)
+        sub-one (gmir/vreg 6)
+        next-i (gmir/vreg 7)
+        next-acc (gmir/vreg 8)
+        module {:gmir/version 3
+                :gmir/entry 'loop-helper
+                :gmir/functions
+                [{:gmir/name 'id :gmir/arity 1
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst (gmir/vreg 10)
+                    :gmir/index 0}
+                   {:gmir/op :gmir/return :gmir/value (gmir/vreg 10)}]}
+                 {:gmir/name 'loop-helper :gmir/arity 2
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst i :gmir/index 0}
+                   {:gmir/op :gmir/argument :gmir/dst acc :gmir/index 1}
+                   {:gmir/op :gmir/constant :gmir/dst zero :gmir/value 0}
+                   {:gmir/op :gmir/equal :gmir/dst done?
+                    :gmir/left i :gmir/right zero}
+                   {:gmir/op :gmir/branch-zero :gmir/test done?
+                    :gmir/target :test.label/continue}
+                   {:gmir/op :gmir/return :gmir/value acc}
+                   {:gmir/op :gmir/label :gmir/id :test.label/continue}
+                   {:gmir/op :gmir/constant :gmir/dst call-one :gmir/value 1}
+                   {:gmir/op :gmir/call :gmir/dst stepped
+                    :gmir/callee 'id :gmir/arguments [call-one]}
+                   {:gmir/op :gmir/constant :gmir/dst sub-one :gmir/value 1}
+                   {:gmir/op :gmir/subtract :gmir/dst next-i
+                    :gmir/left i :gmir/right sub-one}
+                   {:gmir/op :gmir/add :gmir/dst next-acc
+                    :gmir/left acc :gmir/right stepped}
+                   {:gmir/op :gmir/tail-call :gmir/callee 'loop-helper
+                    :gmir/arguments [next-i next-acc]}]}]}]
+    (doseq [target mir/targets]
+      (let [function (second (:mir/functions
+                              (->> module (mir/select-target target)
+                                   mir/allocate-registers)))
+            instructions (:mir/instructions function)
+            preserved (set (get mir/preserved-registers target))]
+        (is (= :call-live (:mir/frame-policy function)) target)
+        (is (zero? (:mir/frame-slots function)) target)
+        (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
+                                  (:mir/op %))
+                      instructions) target)
+        (is (= 2 (count (mir/saved-registers target instructions))) target)
+        (is (every? preserved (mir/saved-registers target instructions)) target)
+        (is (= :mir/tail-call (:mir/op (peek instructions))) target)))))
 
 (deftest v3-fifth-call-argument-is-loaded-directly-from-one-entry-slot
   (with-scratch-tier-only
