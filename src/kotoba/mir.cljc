@@ -1391,6 +1391,31 @@
              (distinct (filter gmir/vreg? (sources instruction)))))
    {} instructions))
 
+(defn- direct-recur-home-candidates
+  "Map a self-tail argument SSA value to its exact allocator-owned parameter
+  home when that recur is the value's sole use.  A repeated argument is not a
+  candidate: one producer cannot define two homes, and the parallel-copy
+  scheduler must retain responsibility for duplicating it.  Register
+  availability is checked separately at the producer, where interference is
+  known."
+  [instructions current-function parameter-homes indexes]
+  (reduce-kv
+   (fn [candidates index {:mir/keys [op callee arguments]}]
+     (if (and (= :mir/tail-call op)
+              (= current-function callee)
+              (= (count arguments) (count parameter-homes)))
+       (let [counts (frequencies arguments)]
+         (reduce (fn [out [value home]]
+                   (if (and (gmir/vreg? value)
+                            (= 1 (get counts value))
+                            (= [index] (get indexes value)))
+                     (assoc out value home)
+                     out))
+                 candidates
+                 (map vector arguments parameter-homes)))
+       candidates))
+   {} instructions))
+
 (defn- next-use-of [indexes index value]
   (some (fn [use]
           (when (>= use index) use))
@@ -1805,7 +1830,12 @@
                              parameter-homes
                              (some #(and (= :mir/tail-call (:mir/op %))
                                          (= current-function (:mir/callee %)))
-                                   instructions))]
+                                   instructions))
+        recur-home-candidates
+        (if direct-reentry?
+          (direct-recur-home-candidates instructions current-function
+                                        parameter-homes indexes)
+          {})]
     (letfn [(spill-assigned [state value instruction]
               (let [register (get-in state [:assigned value])]
                 (when-not register
@@ -2039,7 +2069,29 @@
                       (do
                         (when (contains? assigned dst)
                           (reject! :multiple-definition instruction))
-                        (let [dying-left (when (and (= prefer :scratch)
+                        (let [desired-home (get recur-home-candidates dst)
+                              home-owner (when desired-home
+                                           (some (fn [[value register]]
+                                                   (when (= desired-home register)
+                                                     value))
+                                                 assigned))
+                              ;; A definition may overwrite its requested home
+                              ;; only when the register is free, or when the old
+                              ;; value is an operand whose final CFG use is this
+                              ;; very instruction.  Physical integer operations
+                              ;; read all operands before writing DST, so this
+                              ;; preserves simultaneous SSA semantics.  Any
+                              ;; interference falls back to ordinary allocation
+                              ;; and the proven parallel-copy scheduler.
+                              direct-home (when (and desired-home
+                                                     (or (nil? home-owner)
+                                                         (and (contains? protected
+                                                                         home-owner)
+                                                              (= index
+                                                                 (get last-use
+                                                                      home-owner)))))
+                                            desired-home)
+                              dying-left (when (and (= prefer :scratch)
                                                     (gmir/vreg? (:mir/left instruction))
                                                     (= index (get last-use
                                                                   (:mir/left instruction))))
@@ -2047,16 +2099,21 @@
                               from-primary (if (= prefer :preserved)
                                              (first reserve)
                                              (first free))
-                              register (or from-primary dying-left)
+                              register (or direct-home from-primary dying-left)
                               [state register]
                               (if register
                                 [{:assigned assigned
-                                  :free (if (and from-primary (= prefer :scratch))
-                                          (vec (rest free))
-                                          free)
-                                  :reserve (if (and from-primary (= prefer :preserved))
-                                             (vec (rest reserve))
-                                             reserve)
+                                  :free (if direct-home
+                                          (vec (remove #{direct-home} free))
+                                          (if (and from-primary (= prefer :scratch))
+                                            (vec (rest free))
+                                            free))
+                                  :reserve (if direct-home
+                                             (vec (remove #{direct-home} reserve))
+                                             (if (and from-primary
+                                                      (= prefer :preserved))
+                                               (vec (rest reserve))
+                                               reserve))
                                   :backed backed
                                   :next-slot next-slot :out out :index index
                                   :def-position def-position}

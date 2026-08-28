@@ -1205,9 +1205,63 @@
                (:mir/op (peek instructions))) target)
         (when (= :aarch64 target)
           (let [boundary (first (filter #(= :mir/reentry (:mir/op %))
-                                        instructions))]
+                                        instructions))
+                recur-index (first (keep-indexed
+                                    #(when (= :mir/recur (:mir/op %2)) %1)
+                                    instructions))
+                reentry-index (first (keep-indexed
+                                      #(when (= :mir/reentry (:mir/op %2)) %1)
+                                      instructions))
+                recur-body (subvec instructions (inc reentry-index)
+                                   recur-index)]
             (is (= (:mir/parameters boundary)
-                   (:mir/arguments (peek instructions))))))))))
+                   (:mir/arguments (peek instructions))))
+            ;; Both recur arguments are produced once and consumed only by
+            ;; this edge.  Their producers therefore write x19/x20 directly;
+            ;; only the public-entry ABI-to-home moves remain before REENTRY.
+            (is (not-any? #(= :mir/move (:mir/op %)) recur-body))
+            (is (= 2 (count (filter #(= :mir/move (:mir/op %))
+                                    instructions))))))))))
+
+(deftest aarch64-direct-home-coalescing-falls-back-on-interference-and-duplicates
+  (let [a (gmir/vreg 370) b (gmir/vreg 371)
+        one (gmir/vreg 372) next-a (gmir/vreg 373) next-b (gmir/vreg 374)
+        function (fn [arguments]
+                   {:gmir/version 3 :gmir/entry 'step
+                    :gmir/functions
+                    [{:gmir/name 'step :gmir/arity 2
+                      :gmir/instructions
+                      [{:gmir/op :gmir/argument :gmir/dst a :gmir/index 0}
+                       {:gmir/op :gmir/argument :gmir/dst b :gmir/index 1}
+                       {:gmir/op :gmir/label :gmir/id :test.label/again}
+                       {:gmir/op :gmir/constant :gmir/dst one :gmir/value 1}
+                       ;; NEXT-A wants A's home, but A remains live until the
+                       ;; following producer.  It must use ordinary allocation.
+                       {:gmir/op :gmir/add :gmir/dst next-a
+                        :gmir/left b :gmir/right one}
+                       {:gmir/op :gmir/add :gmir/dst next-b
+                        :gmir/left a :gmir/right one}
+                       {:gmir/op :gmir/tail-call :gmir/callee 'step
+                        :gmir/arguments arguments}]}]})
+        allocate (fn [arguments]
+                   (->> (function arguments)
+                        (mir/select-target :aarch64)
+                        mir/allocate-registers
+                        :mir/functions first :mir/instructions))
+        interfered (allocate [next-a next-b])
+        duplicated (allocate [next-a next-a])
+        after-boundary (fn [instructions]
+                         (vec (rest (drop-while
+                                    #(not= :mir/reentry (:mir/op %))
+                                    instructions))))]
+    ;; Interference retains a copy into A's home.  The producer is never
+    ;; allowed to overwrite a live A merely to satisfy the recur edge.
+    (is (some #(= :mir/move (:mir/op %)) (after-boundary interfered)))
+    ;; A duplicated SSA argument cannot be coalesced into two homes.  The
+    ;; parallel-copy scheduler remains responsible for the duplication.
+    (is (some #(= :mir/move (:mir/op %)) (after-boundary duplicated)))
+    (is (= [:aarch64/x0 :aarch64/x1]
+           (:mir/arguments (peek duplicated))))))
 
 (deftest aarch64-self-recur-parallel-copies-handle-a-register-cycle
   (let [a (gmir/vreg 300) b (gmir/vreg 301)
