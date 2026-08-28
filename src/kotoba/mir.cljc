@@ -2429,27 +2429,28 @@
   23's empty set was `:non-prefix-argument` (label before `:mir/argument`).
   Iteration 27: the full amu suite with `back-edge?` false failed only the
   production all-vreg policy asserts. `last-uses` is CFG-backed."
-  [program current-function]
-  (validate-flat! program)
-  (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)
+  [program]
+  (let [current-function (::current-function (meta program))]
+    (validate-flat! program)
+    (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)
         calls? (boolean (some #(call-operation? (:mir/op %))
                               (:mir/instructions program)))]
-    (let [schedule-allocated
-          (fn [allocated]
-            (schedule-program allocated))]
-      (try
-        (let [allocated (schedule-allocated
-                         (coalesce-phi-transports
-                          (allocate-without-spills program merge-slots
-                                                   current-function)
-                          merge-slots))]
-          [allocated (if calls? :call-live :allocator)])
-        (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
-          (if (= :spill-required (:problem (ex-data error)))
-            [(schedule-allocated
-              (allocate-with-spills program merge-dst-by-slot))
-             (if calls? :all-vregs :allocator)]
-            (throw error)))))))
+      (let [schedule-allocated
+            (fn [allocated]
+              (schedule-program allocated))]
+        (try
+          (let [allocated (schedule-allocated
+                           (coalesce-phi-transports
+                            (allocate-without-spills program merge-slots
+                                                     current-function)
+                            merge-slots))]
+            [allocated (if calls? :call-live :allocator)])
+          (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
+            (if (= :spill-required (:problem (ex-data error)))
+              [(schedule-allocated
+                (allocate-with-spills program merge-dst-by-slot))
+               (if calls? :all-vregs :allocator)]
+              (throw error))))))))
 
 (defn- allocate-flat
   "Allocate virtual MIR deterministically. No-call bodies spill only values
@@ -2457,7 +2458,7 @@
   live-across values in the preserved tier; leftover pressure still takes
   the conservative all-vreg path."
   [program]
-  (first (allocate-with-policy program nil)))
+  (first (allocate-with-policy program)))
 
 (defn allocate-registers
   "Allocate a legacy flat program or every function in a v3 module. A function
@@ -2492,9 +2493,11 @@
                            :call-live]
                           (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
                             (if (= :spill-required (:problem (ex-data error)))
-                              (allocate-with-policy virtual name)
+                              (allocate-with-policy
+                               (vary-meta virtual assoc ::current-function name))
                               (throw error))))
-                        (allocate-with-policy virtual name))]
+                        (allocate-with-policy
+                         (vary-meta virtual assoc ::current-function name)))]
                   {:mir/name name
                    :mir/arity arity
                    :mir/frame-slots (:mir/frame-slots allocated)
