@@ -1353,14 +1353,34 @@
                         mir/allocate-registers :mir/functions first
                         :mir/instructions))
         multi-use-instructions (allocate multi-use)
-        multi-site-instructions (allocate multi-site)]
+        multi-site-instructions (allocate multi-site)
+        edge-moves (fn [instructions recur-index]
+                     (let [start (last (keep-indexed
+                                        (fn [index instruction]
+                                          (when (and (< index recur-index)
+                                                     (contains?
+                                                      #{:mir/reentry :mir/label
+                                                        :mir/branch-zero
+                                                        :mir/branch-nonzero}
+                                                      (:mir/op instruction)))
+                                            index))
+                                        instructions))]
+                       (filterv #(= :mir/move (:mir/op %))
+                                (subvec instructions (inc start) recur-index))))
+        multi-use-recur (first (keep-indexed
+                                #(when (= :mir/recur (:mir/op %2)) %1)
+                                multi-use-instructions))
+        multi-site-recurs (vec (keep-indexed
+                                #(when (= :mir/recur (:mir/op %2)) %1)
+                                multi-site-instructions))]
     (is (= :mir/recur (:mir/op (peek multi-use-instructions))))
-    (is (some #(= :mir/move (:mir/op %)) multi-use-instructions))
-    (is (= 2 (count (filter #(= :mir/recur (:mir/op %))
-                            multi-site-instructions))))
+    (is (seq (edge-moves multi-use-instructions multi-use-recur))
+        "(b,a+b) retains transport on its recur edge, not merely entry moves")
+    (is (= 2 (count multi-site-recurs)))
     ;; Path-sensitive ownership is outside this local proof: both sites retain
     ;; the established parallel-copy path.
-    (is (some #(= :mir/move (:mir/op %)) multi-site-instructions))))
+    (is (every? seq (map #(edge-moves multi-site-instructions %)
+                         multi-site-recurs)))))
 
 (deftest aarch64-self-recur-parallel-copies-handle-a-register-cycle
   (let [a (gmir/vreg 300) b (gmir/vreg 301)
