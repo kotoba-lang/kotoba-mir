@@ -530,14 +530,26 @@
                 recurs (filterv #(= :mir/recur (:mir/op %)) instructions)
                 reentry-index (first (keep-indexed
                                       #(when (= :mir/reentry (:mir/op %2)) %1)
-                                      instructions))]
+                                      instructions))
+                recur-terminates?
+                (every? (fn [[index instruction]]
+                          (if (= :mir/recur (:mir/op instruction))
+                            (let [next-instruction (get instructions (inc index))]
+                              (or (nil? next-instruction)
+                                  (= :mir/label (:mir/op next-instruction))))
+                            true))
+                        (map-indexed vector instructions))]
             (when-not (if (seq recurs)
                         (and (= :aarch64 target)
                              (= 1 (count reentries))
                              (= arity (count (:mir/parameters (first reentries))))
+                             (= arity
+                                (count (distinct
+                                        (:mir/parameters (first reentries)))))
                              (valid-direct-reentry-prefix?
                               target arity instructions reentry-index
                               (:mir/parameters (first reentries)))
+                             recur-terminates?
                              (every? #(= (:mir/parameters (first reentries))
                                          (:mir/arguments %))
                                      recurs))

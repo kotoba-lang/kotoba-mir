@@ -1303,7 +1303,18 @@
                       [(assoc boundary :mir/parameters
                               [:aarch64/x20 :aarch64/x19])
                        (assoc recur :mir/arguments
-                              [:aarch64/x20 :aarch64/x19])])]]]
+                              [:aarch64/x20 :aarch64/x19])])]
+             ["parameter homes are not unique"
+              (concat arguments moves
+                      [(assoc boundary :mir/parameters
+                              [:aarch64/x19 :aarch64/x19])
+                       (assoc recur :mir/arguments
+                              [:aarch64/x19 :aarch64/x19])])]
+             ["recur does not terminate its block"
+              (concat arguments moves
+                      [boundary recur
+                       {:mir/op :mir/constant :mir/dst :aarch64/x2
+                        :mir/value 1}])]]]
       (is (thrown? clojure.lang.ExceptionInfo
                    (mir/validate! (module instructions))) why))))
 
