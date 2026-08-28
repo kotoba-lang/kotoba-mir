@@ -2505,3 +2505,89 @@
         (is (= allocated
                (->> program (mir/select-target target) mir/allocate-registers))
             target)))))
+
+(defn- counted-function
+  ([] (counted-function {}))
+  ([{:keys [body-extra tail-counter branch-op tail-name]
+     :or {body-extra [] branch-op :mir/branch-nonzero tail-name 'counted}}]
+   (let [[counter state zero one next-counter next-state]
+         (map gmir/vreg (range 6))]
+     {:mir/name 'counted
+      :mir/arity 2
+      :mir/instructions
+      (vec (concat
+            [{:mir/op :mir/argument :mir/dst counter :mir/index 0}
+             {:mir/op :mir/argument :mir/dst state :mir/index 1}
+             {:mir/op branch-op :mir/test counter :mir/target :test/body}
+             {:mir/op :mir/return :mir/value state}
+             {:mir/op :mir/label :mir/id :test/body}]
+            body-extra
+            [{:mir/op :mir/constant :mir/dst one :mir/value 1}
+             {:mir/op :mir/subtract :mir/dst next-counter
+              :mir/left counter :mir/right one}
+             {:mir/op :mir/add :mir/dst next-state
+              :mir/left state :mir/right one}
+             {:mir/op :mir/tail-call :mir/callee tail-name
+              :mir/arguments [(or tail-counter next-counter) next-state]}]))})))
+
+(deftest bulk-fuel-plan-admits-only-an-exact-pure-nontrapping-countdown
+  (is (= {:counter-parameter 0
+          :runtime-domain :nonnegative-i64
+          :charge :entry-plus-exact-self-recur-count}
+         (mir/counted-self-recur-plan (counted-function))))
+  (testing "negative counters remain a runtime fallback, never a wrapped plan"
+    (is (= :nonnegative-i64
+           (:runtime-domain (mir/counted-self-recur-plan (counted-function))))))
+  (doseq [[why function]
+          [["effect/capability"
+            (counted-function {:body-extra
+                               [{:mir/op :mir/capability-call
+                                 :mir/dst (gmir/vreg 20) :mir/capability 0
+                                 :mir/kind :call :mir/context-offset 48
+                                 :mir/arguments []}]})]
+           ["ordinary call"
+            (counted-function {:body-extra
+                               [{:mir/op :mir/call :mir/dst (gmir/vreg 20)
+                                 :mir/callee 'other :mir/arguments []}]})]
+           ["memory"
+            (counted-function {:body-extra
+                               [{:mir/op :mir/memory-load-i64
+                                 :mir/dst (gmir/vreg 20)
+                                 :mir/base (gmir/vreg 1) :mir/offset 0}]})]
+           ["data-dependent exit"
+            (update (counted-function) :mir/instructions
+                    #(vec (concat (subvec % 0 5)
+                                  [{:mir/op :mir/branch-zero
+                                    :mir/test (gmir/vreg 1)
+                                    :mir/target :test/early}]
+                                  (subvec % 5))))]
+           ["division by zero"
+            (counted-function {:body-extra
+                               [{:mir/op :mir/quotient-constant
+                                 :mir/dst (gmir/vreg 20)
+                                 :mir/left (gmir/vreg 1) :mir/divisor 0}]})]
+           ["signed MIN/-1 division"
+            (counted-function {:body-extra
+                               [{:mir/op :mir/quotient-constant
+                                 :mir/dst (gmir/vreg 20)
+                                 :mir/left (gmir/vreg 1) :mir/divisor -1}]})]
+           ["non-unit/dependent decrement"
+            (counted-function {:tail-counter (gmir/vreg 1)})]
+           ["different callee"
+            (counted-function {:tail-name 'other})]
+           ["wrong latch sense"
+            (counted-function {:branch-op :mir/branch-zero})]]]
+    (is (nil? (mir/counted-self-recur-plan function)) why)))
+
+(deftest bulk-fuel-plan-rejects-nested-and-multiple-recur-sites
+  (let [extra-tail {:mir/op :mir/tail-call :mir/callee 'counted
+                    :mir/arguments [(gmir/vreg 0) (gmir/vreg 1)]}
+        nested-branch {:mir/op :mir/branch-nonzero :mir/test (gmir/vreg 1)
+                       :mir/target :test/nested}]
+    (is (nil? (mir/counted-self-recur-plan
+               (update (counted-function) :mir/instructions
+                       #(vec (concat (butlast %) [extra-tail (last %)]))))))
+    (is (nil? (mir/counted-self-recur-plan
+               (update (counted-function) :mir/instructions
+                       #(vec (concat (subvec % 0 5) [nested-branch]
+                                     (subvec % 5)))))))))
