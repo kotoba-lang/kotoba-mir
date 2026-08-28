@@ -158,6 +158,11 @@
    :mir/spill-load #{:mir/op :mir/dst :mir/slot}
    :mir/spill-store #{:mir/op :mir/src :mir/slot}
    :mir/move #{:mir/op :mir/dst :mir/src}
+   ;; Physical-only AArch64 self-tail re-entry. The boundary carries the
+   ;; allocator-owned parameter homes; recur edges have already performed the
+   ;; simultaneous assignment into exactly those registers.
+   :mir/reentry #{:mir/op :mir/parameters}
+   :mir/recur #{:mir/op :mir/arguments}
    :mir/label #{:mir/op :mir/id}
    :mir/branch-zero #{:mir/op :mir/test :mir/target}
    :mir/branch-nonzero #{:mir/op :mir/test :mir/target}
@@ -174,11 +179,11 @@
 
 (def ^:private v1-operations
   (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call
-        :mir/quotient-constant :mir/branch-nonzero))
+        :mir/quotient-constant :mir/branch-nonzero :mir/reentry :mir/recur))
 
 (def ^:private v2-operations
   (disj (set (keys instruction-keysets)) :mir/call :mir/tail-call
-        :mir/quotient-constant :mir/branch-nonzero))
+        :mir/quotient-constant :mir/branch-nonzero :mir/reentry :mir/recur))
 
 (def ^:private v3-operations
   (set (keys instruction-keysets)))
@@ -240,6 +245,10 @@
         (when (and (= :virtual registers)
                    (contains? #{:mir/spill-load :mir/spill-store :mir/move} op))
           (reject! :physical-operation-in-virtual-program instruction))
+        (when (and (contains? #{:mir/reentry :mir/recur} op)
+                   (or (= :virtual registers) (not= :aarch64 target)
+                       (not= 3 version)))
+          (reject! :direct-reentry-profile-violation instruction))
         (when (and (= :virtual registers)
                    (contains? #{:mir/multiply-add :mir/multiply-subtract} op))
           (reject! :target-selected-operation-in-virtual-program instruction))
@@ -251,7 +260,9 @@
                                              :mir/base :mir/length
                                              :mir/stored :mir/offset :mir/size])
                           (when (vector? (:mir/arguments instruction))
-                            (:mir/arguments instruction)))]
+                            (:mir/arguments instruction))
+                          (when (vector? (:mir/parameters instruction))
+                            (:mir/parameters instruction)))]
           (when-not (register? register)
             (reject! :register-profile-violation instruction)))
         (when (and (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
@@ -298,6 +309,14 @@
                               (subvec (get call-argument-registers target)
                                       0 (count (:mir/arguments instruction)))))
               (reject! :physical-call-profile-violation instruction))))
+        (when (= :mir/reentry op)
+          (when-not (and (vector? (:mir/parameters instruction))
+                         (<= (count (:mir/parameters instruction)) 5))
+            (reject! :invalid-direct-reentry instruction)))
+        (when (= :mir/recur op)
+          (when-not (and (vector? (:mir/arguments instruction))
+                         (<= (count (:mir/arguments instruction)) 5))
+            (reject! :invalid-direct-recur instruction)))
         (when (= op :mir/runtime-call)
           (let [runtime (:mir/runtime instruction)
                 arguments (:mir/arguments instruction)
@@ -433,7 +452,9 @@
                             #{:mir/name :mir/arity :mir/instructions}
                             #{:mir/name :mir/arity :mir/frame-slots
                               :mir/frame-policy :mir/instructions})
-            calls (filter #(call-operation? (:mir/op %)) instructions)
+            calls (filter #(or (call-operation? (:mir/op %))
+                               (= :mir/recur (:mir/op %)))
+                          instructions)
             direct-calls (filter #(contains? #{:mir/call :mir/tail-call}
                                               (:mir/op %)) instructions)]
         (when-not (and (= expected-keys (set (keys function)))
@@ -461,6 +482,18 @@
                      (not (contains? #{:all-vregs :call-live} frame-policy))
                      (not= :allocator frame-policy)))
           (reject! :call-frame-policy-violation function))
+        (when (= :physical registers)
+          (let [reentries (filterv #(= :mir/reentry (:mir/op %)) instructions)
+                recurs (filterv #(= :mir/recur (:mir/op %)) instructions)]
+            (when-not (if (seq recurs)
+                        (and (= :aarch64 target)
+                             (= 1 (count reentries))
+                             (= arity (count (:mir/parameters (first reentries))))
+                             (every? #(= (:mir/parameters (first reentries))
+                                         (:mir/arguments %))
+                                     recurs))
+                        (empty? reentries))
+              (reject! :invalid-direct-reentry-contract function))))
         (when (and (= :physical registers) (= :all-vregs frame-policy))
           (let [value-ops #{:mir/argument :mir/constant :mir/add :mir/subtract
                             :mir/multiply :mir/quotient :mir/quotient-constant
@@ -1467,6 +1500,9 @@
          :free (:scratch placement)
          :reserve (:preserved placement)
          :instructions (into markers (concat stores (:instructions scheduled)))
+         :parameter-homes (when (and (empty? entry-spills)
+                                     (= (count arguments) (count assigned)))
+                            (mapv #(get assigned (:mir/dst %)) arguments))
          :used-temp? (:used-temp? scheduled)}))))
 
 (defn- call-live-slots
@@ -1685,7 +1721,8 @@
   that are currently assigned leave the assignment so the next use in that
   block loads them again. The call itself uses the ABI registers. Pressure
   that still cannot complete falls out as :spill-required."
-  [{:mir/keys [version target registers instructions] :as program} merge-slots]
+  [{:mir/keys [version target registers instructions] :as program} merge-slots
+   current-function]
   (when-not (= :virtual registers)
     (reject! :registers-not-virtual program))
   (let [last-use (last-uses instructions)
@@ -1700,7 +1737,14 @@
         ;; host-callback and self-tail helpers rely on that physical placement.
         entry (entry-argument-plan target pool instructions last-use
                                    merge-slots {}
-                                   (if (= :aarch64 target) crossing #{}))]
+                                   (if (= :aarch64 target) crossing #{}))
+        parameter-homes (:parameter-homes entry)
+        direct-reentry? (and (= :aarch64 target)
+                             current-function
+                             parameter-homes
+                             (some #(and (= :mir/tail-call (:mir/op %))
+                                         (= current-function (:mir/callee %)))
+                                   instructions))]
     (letfn [(spill-assigned [state value instruction]
               (let [register (get-in state [:assigned value])]
                 (when-not register
@@ -1750,8 +1794,38 @@
                            register])
                         (reject! :spill-required instruction)))))))
             (emit-call [state index instruction]
-              (let [{:mir/keys [op dst arguments]} instruction
-                    call-registers (subvec (argument-registers-for-call
+              (let [{:mir/keys [op dst arguments callee]} instruction
+                    direct-recur? (and direct-reentry?
+                                       (= :mir/tail-call op)
+                                       (= current-function callee)
+                                       ;; A backed source needs a load. Mixing
+                                       ;; those loads with a parallel register
+                                       ;; copy can overwrite a still-needed
+                                       ;; source, so that site retains the
+                                       ;; ordinary ABI tail path.
+                                       (every? #(contains? (:assigned state) %)
+                                               arguments))]
+                (if direct-recur?
+                  (let [copies (mapv (fn [value register]
+                                       {:mir/dst register
+                                        :mir/src (get-in state [:assigned value])})
+                                     arguments parameter-homes)
+                        temp-slot (or (:temp-slot state) (:next-slot state))
+                        scheduled (schedule-parallel-copies copies temp-slot)
+                        pinning-temp? (and (:used-temp? scheduled)
+                                           (not (:used-temp? state)))]
+                    (-> state
+                        (update :out into (:instructions scheduled))
+                        (update :out conj {:mir/op :mir/recur
+                                           :mir/arguments parameter-homes})
+                        (assoc :used-temp? (or (:used-temp? state)
+                                               (:used-temp? scheduled))
+                               :next-slot (cond-> (:next-slot state)
+                                            pinning-temp? inc)
+                               :temp-slot (if (:used-temp? scheduled)
+                                            temp-slot
+                                            (:temp-slot state)))))
+                  (let [call-registers (subvec (argument-registers-for-call
                                             target instruction)
                                            0 (count arguments))
                     live-across (->> (keys (:assigned state))
@@ -1826,14 +1900,17 @@
                     state (expire-assigned-in-pool target state expired)]
                 (if (gmir/vreg? dst)
                   (assoc-in state [:def-position dst] (count (:out state)))
-                  state)))]
+                  state)))))]
       (loop [index (:argument-count entry), remaining (:remaining entry)
              assigned (:assigned entry), free (:free entry)
              reserve (:reserve entry)
              backed (:entry-spills entry)
              next-slot (cond-> (:stable-slot-count entry)
                          (:used-temp? entry) inc)
-             out (:instructions entry), used-temp? (:used-temp? entry)
+             out (cond-> (:instructions entry)
+                   direct-reentry? (conj {:mir/op :mir/reentry
+                                          :mir/parameters parameter-homes}))
+             used-temp? (:used-temp? entry)
              temp-slot (:temp-slot entry)
              ;; Everything the entry plan assigned is in place by the end of its
              ;; own instructions, so that is where a store of one of them goes.
@@ -1975,13 +2052,16 @@
                        (if (gmir/vreg? dst)
                          (assoc def-position dst (inc (count out)))
                          def-position)))))
-          (validate-flat!
-           {:mir/version version
-            :mir/target target
-            :mir/registers :physical
-            :mir/frame-slots (+ next-slot
-                                (if used-temp? 1 0))
-            :mir/instructions out}))))))
+          (let [out (if (some #(= :mir/recur (:mir/op %)) out)
+                      out
+                      (vec (remove #(= :mir/reentry (:mir/op %)) out)))]
+            (validate-flat!
+             {:mir/version version
+              :mir/target target
+              :mir/registers :physical
+              :mir/frame-slots (+ next-slot
+                                  (if used-temp? 1 0))
+              :mir/instructions out})))))))
 
 (defn- validate-ssa-definition-order [instructions]
   (:ordered
@@ -2288,7 +2368,7 @@
   23's empty set was `:non-prefix-argument` (label before `:mir/argument`).
   Iteration 27: the full amu suite with `back-edge?` false failed only the
   production all-vreg policy asserts. `last-uses` is CFG-backed."
-  [program]
+  [program current-function]
   (validate-flat! program)
   (let [{:keys [program merge-slots merge-dst-by-slot]} (lower-phis program)
         calls? (boolean (some #(call-operation? (:mir/op %))
@@ -2299,7 +2379,8 @@
       (try
         (let [allocated (schedule-allocated
                          (coalesce-phi-transports
-                          (allocate-without-spills program merge-slots)
+                          (allocate-without-spills program merge-slots
+                                                   current-function)
                           merge-slots))]
           [allocated (if calls? :call-live :allocator)])
         (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
@@ -2315,7 +2396,7 @@
   live-across values in the preserved tier; leftover pressure still takes
   the conservative all-vreg path."
   [program]
-  (first (allocate-with-policy program)))
+  (first (allocate-with-policy program nil)))
 
 (defn allocate-registers
   "Allocate a legacy flat program or every function in a v3 module. A function
@@ -2350,9 +2431,9 @@
                            :call-live]
                           (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
                             (if (= :spill-required (:problem (ex-data error)))
-                              (allocate-with-policy virtual)
+                              (allocate-with-policy virtual name)
                               (throw error))))
-                        (allocate-with-policy virtual))]
+                        (allocate-with-policy virtual name))]
                   {:mir/name name
                    :mir/arity arity
                    :mir/frame-slots (:mir/frame-slots allocated)
