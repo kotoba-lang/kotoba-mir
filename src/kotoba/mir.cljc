@@ -2611,19 +2611,21 @@
            (integer? divisor)
            (not (contains? #{-1 0} divisor)))))
 
-(defn counted-self-recur-plan
-  "Return the conservative bulk-fuel proof for one selected virtual-MIR
-  function, or nil.
+(defn- bulk-fuel-pure-leaf?
+  "Prove a closed direct callee finite, pure and nontrapping.  `leaf` is
+  intentionally literal here: calls, branches and tail calls are not admitted,
+  even when another analysis could prove them finite.  This keeps the proof
+  local and prevents a call-graph cycle from entering bulk-fuel admission."
+  [{:mir/keys [name instructions]}]
+  (and (symbol? name)
+       (= 1 (count (filter #(= :mir/return (:mir/op %)) instructions)))
+       (every? (fn [instruction]
+                 (or (= :mir/return (:mir/op instruction))
+                     (bulk-fuel-pure-instruction? instruction)))
+               instructions)))
 
-  The admitted CFG has one latch branch, one base return, one body label and
-  one terminal self tail-call.  Its counter is an entry argument tested
-  directly for nonzero and the corresponding recur argument is exactly
-  `counter - 1`.  The remaining body is closed, pure and nontrapping.
-
-  This proves the iteration count for a non-negative runtime counter.  A
-  backend must retain ordinary per-edge charging for negative counters; this
-  function does not authorize wrapping a negative value into a bulk charge."
-  [{:mir/keys [name arity instructions]}]
+(defn- counted-self-recur-plan*
+  [{:mir/keys [name arity instructions]} pure-leaf-callees]
   (let [instructions (vec instructions)
         indexed (map-indexed vector instructions)
         branches (filterv (fn [[_ instruction]]
@@ -2683,11 +2685,29 @@
                    (= 1 (:mir/value one))
                    (every? (fn [instruction]
                              (or (contains? structural-ops (:mir/op instruction))
-                                 (bulk-fuel-pure-instruction? instruction)))
+                                 (bulk-fuel-pure-instruction? instruction)
+                                 (and (= :mir/call (:mir/op instruction))
+                                      (contains? pure-leaf-callees
+                                                 (:mir/callee instruction)))))
                            instructions))
           {:counter-parameter counter-index
            :runtime-domain :nonnegative-i64
            :charge :entry-plus-exact-self-recur-count})))))
+
+(defn counted-self-recur-plan
+  "Return the conservative bulk-fuel proof for one selected virtual-MIR
+  function, or nil.
+
+  The admitted CFG has one latch branch, one base return, one body label and
+  one terminal self tail-call.  Its counter is an entry argument tested
+  directly for nonzero and the corresponding recur argument is exactly
+  `counter - 1`.  The remaining body is closed, pure and nontrapping.
+
+  This proves the iteration count for a non-negative runtime counter.  A
+  backend must retain ordinary per-edge charging for negative counters; this
+  function does not authorize wrapping a negative value into a bulk charge."
+  [function]
+  (counted-self-recur-plan* function #{}))
 
 (defn counted-self-recur-plans
   "Map function names to proven counted/pure self-recur fuel plans.  PROGRAM
@@ -2697,8 +2717,14 @@
   (validate! program)
   (when-not (and (= 3 version) (= :virtual registers))
     (reject! :bulk-fuel-analysis-requires-selected-virtual-module program))
-  (into {}
-        (keep (fn [{:mir/keys [name] :as function}]
-                (when-let [plan (counted-self-recur-plan function)]
-                  [name plan])))
-        functions))
+  (let [pure-leaf-callees (into #{}
+                                (keep (fn [{:mir/keys [name] :as function}]
+                                        (when (bulk-fuel-pure-leaf? function)
+                                          name)))
+                                functions)]
+    (into {}
+          (keep (fn [{:mir/keys [name] :as function}]
+                  (when-let [plan (counted-self-recur-plan*
+                                   function pure-leaf-callees)]
+                    [name plan])))
+          functions)))

@@ -2591,3 +2591,62 @@
                (update (counted-function) :mir/instructions
                        #(vec (concat (subvec % 0 5) [nested-branch]
                                      (subvec % 5)))))))))
+
+(deftest bulk-fuel-module-admits-only-proven-pure-nontrapping-leaf-calls
+  (let [call-result (gmir/vreg 20)
+        helper-arg (gmir/vreg 30)
+        helper-one (gmir/vreg 31)
+        helper-result (gmir/vreg 32)
+        caller (counted-function
+                {:body-extra [{:mir/op :mir/call :mir/dst call-result
+                               :mir/callee 'helper
+                               :mir/arguments [(gmir/vreg 1)]}]})
+        helper {:mir/name 'helper :mir/arity 1
+                :mir/instructions
+                [{:mir/op :mir/argument :mir/dst helper-arg :mir/index 0}
+                 {:mir/op :mir/constant :mir/dst helper-one :mir/value 1}
+                 {:mir/op :mir/add :mir/dst helper-result
+                  :mir/left helper-arg :mir/right helper-one}
+                 {:mir/op :mir/return :mir/value helper-result}]}
+        program (fn [callee]
+                  {:mir/version 3 :mir/target :aarch64 :mir/registers :virtual
+                   :mir/entry 'counted
+                   :mir/functions [caller callee]})]
+    (is (= {:counter-parameter 0
+            :runtime-domain :nonnegative-i64
+            :charge :entry-plus-exact-self-recur-count}
+           (get (mir/counted-self-recur-plans (program helper)) 'counted))
+        "the closed module proves the real direct call without erasing it")
+    (is (nil? (mir/counted-self-recur-plan caller))
+        "a function in isolation has no authority to trust a callee")
+    (doseq [[why unsafe-helper]
+            [["trapping leaf"
+              (assoc helper :mir/instructions
+                     [{:mir/op :mir/argument :mir/dst helper-arg :mir/index 0}
+                      {:mir/op :mir/quotient-constant :mir/dst helper-result
+                       :mir/left helper-arg :mir/divisor -1}
+                      {:mir/op :mir/return :mir/value helper-result}])]
+             ["effectful leaf"
+              (assoc helper :mir/instructions
+                     [{:mir/op :mir/argument :mir/dst helper-arg :mir/index 0}
+                      {:mir/op :mir/capability-call :mir/dst helper-result
+                       :mir/capability 0 :mir/kind :i64
+                       :mir/context-offset 48 :mir/arguments [helper-arg]}
+                      {:mir/op :mir/return :mir/value helper-result}])]
+             ["non-leaf call chain"
+              (assoc helper :mir/instructions
+                      [{:mir/op :mir/argument :mir/dst helper-arg :mir/index 0}
+                      {:mir/op :mir/call :mir/dst helper-result
+                       :mir/callee 'helper :mir/arguments [helper-arg]}
+                      {:mir/op :mir/return :mir/value helper-result}])]
+             ["branching callee"
+              (assoc helper :mir/instructions
+                     [{:mir/op :mir/argument :mir/dst helper-arg :mir/index 0}
+                      {:mir/op :mir/branch-zero :mir/test helper-arg
+                       :mir/target :test/helper-zero}
+                      {:mir/op :mir/return :mir/value helper-arg}
+                      {:mir/op :mir/label :mir/id :test/helper-zero}
+                      {:mir/op :mir/return :mir/value helper-arg}])]]]
+      (is (nil? (get (mir/counted-self-recur-plans (program unsafe-helper))
+                     'counted))
+          why))))
