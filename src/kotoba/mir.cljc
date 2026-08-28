@@ -1401,9 +1401,11 @@
   [instructions current-function parameter-homes indexes]
   (let [sites (->> instructions
                    (keep-indexed
-                    (fn [index {:mir/keys [op callee] :as instruction}]
+                    (fn [index {:mir/keys [op callee arguments] :as instruction}]
                       (when (and (= :mir/tail-call op)
-                                 (= current-function callee))
+                                 (= current-function callee)
+                                 (= (count arguments)
+                                    (count parameter-homes)))
                         [index instruction])))
                    vec)]
     ;; Multiple recur sites need path-sensitive interference.  This deliberately
