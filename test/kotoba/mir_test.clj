@@ -51,7 +51,7 @@
         [a b c d x q y called z] (map gmir/vreg (range 9))
         barrier-ops [:mir/quotient :mir/kernel-load-u8 :mir/call
                      :mir/runtime-call :mir/capability-call
-                     :mir/branch-zero :mir/return]]
+                     :mir/branch-zero :mir/branch-nonzero :mir/return]]
     (doseq [target mir/targets
             barrier-op barrier-ops]
       (let [barrier (case barrier-op
@@ -70,6 +70,8 @@
                       {:mir/op barrier-op :mir/dst called :mir/capability :test
                        :mir/kind :i64 :mir/context-offset 0 :mir/arguments [x]}
                       :mir/branch-zero
+                      {:mir/op barrier-op :mir/test x :mir/target :done}
+                      :mir/branch-nonzero
                       {:mir/op barrier-op :mir/test x :mir/target :done}
                       :mir/return
                       {:mir/op barrier-op :mir/value x})
@@ -373,6 +375,129 @@
     (is (= :mir/quotient-constant (:mir/op (nth selected-instructions 2))))
     (is (not (contains? (nth selected-instructions 2) :mir/right)))
     (is (= v1 (:mir/right (nth selected-instructions 3))))))
+
+(deftest aarch64-vmir-fuses-unique-zero-equality-branch-before-allocation
+  (let [module {:gmir/version 3 :gmir/entry 'kernel
+                :gmir/functions
+                [{:gmir/name 'kernel :gmir/arity 1
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                   {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 0}
+                   {:gmir/op :gmir/equal :gmir/dst v2
+                    :gmir/left v0 :gmir/right v1}
+                   {:gmir/op :gmir/branch-zero :gmir/test v2
+                    :gmir/target :test.label/nonzero}
+                   {:gmir/op :gmir/return :gmir/value v0}
+                   {:gmir/op :gmir/label :gmir/id :test.label/nonzero}
+                   {:gmir/op :gmir/return :gmir/value v0}]}]}
+        expected {:mir/op :mir/branch-nonzero :mir/test v0
+                  :mir/target :test.label/nonzero}
+        arm (mir/select-target :aarch64 module)
+        arm-instructions (get-in arm [:mir/functions 0 :mir/instructions])
+        allocated (mir/allocate-registers arm)
+        physical-instructions (get-in allocated [:mir/functions 0 :mir/instructions])
+        x86-instructions (get-in (mir/select-target :x86-64 module)
+                                 [:mir/functions 0 :mir/instructions])]
+    (is (= expected (second arm-instructions)))
+    (is (= 5 (count arm-instructions))
+        "zero and equality definitions are removed, not merely ignored later")
+    (is (not-any? #(contains? #{:mir/constant :mir/equal} (:mir/op %))
+                  arm-instructions))
+    (is (= :mir/branch-nonzero (:mir/op (second physical-instructions))))
+    (is (keyword? (:mir/test (second physical-instructions))))
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))
+    (is (= [:mir/argument :mir/constant :mir/equal :mir/branch-zero
+            :mir/return :mir/label :mir/return]
+           (mapv :mir/op x86-instructions))
+        "x86 selection remains byte-path compatible with its TEST/JZ lowering")
+    (let [reversed (assoc-in module [:gmir/functions 0 :gmir/instructions 2]
+                             {:gmir/op :gmir/equal :gmir/dst v2
+                              :gmir/left v1 :gmir/right v0})]
+      (is (= expected
+             (get-in (mir/select-target :aarch64 reversed)
+                     [:mir/functions 0 :mir/instructions 1]))
+          "either equality operand orientation denotes the same fusion"))))
+
+(deftest aarch64-vmir-zero-equality-fusion-requires-global-unique-uses
+  (let [fuse @#'kotoba.mir/aarch64-fuse-zero-equality-branches
+        zero {:mir/op :mir/constant :mir/dst v1 :mir/value 0}
+        equal {:mir/op :mir/equal :mir/dst v2 :mir/left v0 :mir/right v1}
+        branch {:mir/op :mir/branch-zero :mir/test v2
+                :mir/target :test.label/nonzero}
+        fused [{:mir/op :mir/branch-nonzero :mir/test v0
+                :mir/target :test.label/nonzero}]
+        label {:mir/op :mir/label :mir/id :test.label/nonzero}]
+    (is (= fused (fuse :aarch64 [zero equal branch])))
+    (is (= [zero equal branch] (fuse :x86-64 [zero equal branch])))
+    (doseq [[why instructions]
+            [["zero is reused"
+              [zero equal branch
+               {:mir/op :mir/add :mir/dst v3 :mir/left v0 :mir/right v1}]]
+             ["equality result is reused"
+              [zero equal branch
+               {:mir/op :mir/add :mir/dst v3 :mir/left v0 :mir/right v2}]]
+             ["phi incoming is a global use"
+              [zero equal branch label
+               {:mir/op :mir/phi :mir/dst v3
+                :mir/incomings [{:mir/predecessor :test.label/nonzero
+                                 :mir/value v1}]}]]
+             ["equality result reused by phi is global"
+              [zero equal branch label
+               {:mir/op :mir/phi :mir/dst v3
+                :mir/incomings [{:mir/predecessor :test.label/nonzero
+                                 :mir/value v2}]}]]
+             ["the same zero occupies both equality operands"
+              [zero (assoc equal :mir/left v1 :mir/right v1) branch]]
+             ["constant is nonzero" [(assoc zero :mir/value 1) equal branch]]
+             ["branch reads another value" [zero equal (assoc branch :mir/test v3)]]
+             ["comparison is not equality" [zero (assoc equal :mir/op :mir/less-than)
+                                               branch]]
+             ["a label interrupts adjacency" [zero equal label branch]]
+             ["definition order is reversed" [equal zero branch]]
+             ["operand aliases result" [zero (assoc equal :mir/left v2) branch]]]]
+      (is (= instructions (fuse :aarch64 instructions)) why))))
+
+(deftest branch-nonzero-schema-sources-cfg-and-target-closure
+  (let [sources @#'kotoba.mir/instruction-sources
+        last-uses @#'kotoba.mir/cfg-last-uses
+        back-edge? @#'kotoba.mir/back-edge?
+        branch {:mir/op :mir/branch-nonzero :mir/test v0
+                :mir/target :test.label/loop}
+        instructions [{:mir/op :mir/argument :mir/dst v0 :mir/index 0}
+                      {:mir/op :mir/label :mir/id :test.label/loop}
+                      branch]
+        module {:mir/version 3 :mir/target :aarch64 :mir/registers :virtual
+                :mir/entry 'kernel
+                :mir/functions [{:mir/name 'kernel :mir/arity 1
+                                 :mir/instructions instructions}]}]
+    (is (= [v0] (vec (sources branch))))
+    (is (= 2 (get (last-uses instructions) v0)))
+    (is (true? (back-edge? instructions)))
+    (is (= module (mir/validate! module)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (mir/validate! (assoc module :mir/target :x86-64))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (mir/validate!
+                  (assoc-in module [:mir/functions 0 :mir/instructions 2]
+                            (assoc branch :extra true)))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (mir/validate!
+                  (assoc-in module [:mir/functions 0 :mir/instructions 2]
+                            (dissoc branch :mir/test)))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (mir/validate!
+                  (assoc-in module [:mir/functions 0 :mir/instructions 2 :mir/target]
+                            :test.label/missing))))
+    (doseq [version [1 2]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (mir/validate! {:mir/version version :mir/target :aarch64
+                                   :mir/registers :physical :mir/frame-slots 0
+                                   :mir/instructions
+                                   [{:mir/op :mir/label :mir/id :test.label/loop}
+                                    {:mir/op :mir/branch-nonzero
+                                     :mir/test :aarch64/x0
+                                     :mir/target :test.label/loop}]}))
+          (str "branch-nonzero is derived only in v3, not public v" version)))))
 
 (deftest selection-and-allocation-cover-the-f64-family
   (doseq [target mir/targets

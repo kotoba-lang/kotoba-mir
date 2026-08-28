@@ -160,6 +160,7 @@
    :mir/move #{:mir/op :mir/dst :mir/src}
    :mir/label #{:mir/op :mir/id}
    :mir/branch-zero #{:mir/op :mir/test :mir/target}
+   :mir/branch-nonzero #{:mir/op :mir/test :mir/target}
    :mir/jump #{:mir/op :mir/target}
    :mir/phi #{:mir/op :mir/dst :mir/incomings}
    :mir/call #{:mir/op :mir/dst :mir/callee :mir/arguments}
@@ -173,11 +174,11 @@
 
 (def ^:private v1-operations
   (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call
-        :mir/quotient-constant))
+        :mir/quotient-constant :mir/branch-nonzero))
 
 (def ^:private v2-operations
   (disj (set (keys instruction-keysets)) :mir/call :mir/tail-call
-        :mir/quotient-constant))
+        :mir/quotient-constant :mir/branch-nonzero))
 
 (def ^:private v3-operations
   (set (keys instruction-keysets)))
@@ -242,6 +243,8 @@
         (when (and (= :virtual registers)
                    (contains? #{:mir/multiply-add :mir/multiply-subtract} op))
           (reject! :target-selected-operation-in-virtual-program instruction))
+        (when (and (= :mir/branch-nonzero op) (not= :aarch64 target))
+          (reject! :target-selected-operation-target-mismatch instruction))
         (doseq [register (concat
                           (keep instruction [:mir/dst :mir/src :mir/input
                                              :mir/left :mir/right :mir/addend :mir/test
@@ -356,7 +359,8 @@
                          (<= 0 (:mir/slot instruction))
                          (< (:mir/slot instruction) frame-slots))
             (reject! :spill-slot-invalid instruction)))
-        (when (contains? #{:mir/label :mir/branch-zero :mir/jump} op)
+        (when (contains? #{:mir/label :mir/branch-zero :mir/branch-nonzero
+                           :mir/jump} op)
           (let [id (if (= op :mir/label) (:mir/id instruction) (:mir/target instruction))]
             (when-not (gmir/label? id)
               (reject! :invalid-label instruction))))))
@@ -563,6 +567,8 @@
   (concat (keep instruction [:mir/src :mir/input :mir/left :mir/right :mir/addend
                              :mir/test :mir/value :mir/base :mir/length
                              :mir/stored :mir/offset :mir/size])
+          (when (vector? (:mir/incomings instruction))
+            (map :mir/value (:mir/incomings instruction)))
           (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
                              :mir/kernel-load-u32 :mir/kernel-store-u32
                              :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32}
@@ -804,6 +810,48 @@
 (defn- schedule-program [{:mir/keys [target] :as program}]
   (update program :mir/instructions #(schedule-instructions target %)))
 
+(defn- aarch64-fuse-zero-equality-branches
+  "Turn one SSA-only `zero; equal; branch-zero` triple into branch-nonzero.
+
+  Both removed definitions must have exactly one use in the complete function,
+  including phi incoming edges. Exact adjacency excludes labels and other
+  control-flow boundaries. This runs before physical allocation, where vreg
+  identity still makes global use counts meaningful."
+  [target instructions]
+  (if-not (= :aarch64 target)
+    (vec instructions)
+    (let [instructions (vec instructions)
+          use-counts (frequencies
+                      (filter gmir/vreg?
+                              (mapcat instruction-sources instructions)))]
+      (loop [index 0, out []]
+        (if (>= index (count instructions))
+          (vec out)
+          (let [constant (get instructions index)
+                equal (get instructions (inc index))
+                branch (get instructions (+ index 2))
+                zero (:mir/dst constant)
+                result (:mir/dst equal)
+                left (:mir/left equal)
+                right (:mir/right equal)
+                operand (cond (= zero left) right
+                              (= zero right) left)
+                fuse? (and (= :mir/constant (:mir/op constant))
+                           (zero? (:mir/value constant))
+                           (= :mir/equal (:mir/op equal))
+                           (= :mir/branch-zero (:mir/op branch))
+                           (= result (:mir/test branch))
+                           (gmir/vreg? operand)
+                           (= 3 (count (set [zero result operand])))
+                           (= 1 (get use-counts zero))
+                           (= 1 (get use-counts result)))]
+            (if fuse?
+              (recur (+ index 3)
+                     (conj out {:mir/op :mir/branch-nonzero
+                                :mir/test operand
+                                :mir/target (:mir/target branch)}))
+              (recur (inc index) (conj out constant)))))))))
+
 (defn- select-instructions
   "Select one function while retaining SSA constants long enough to choose a
   target-independent constant-divisor operation. A divisor vreg disappears
@@ -837,6 +885,7 @@
         ;; NBB represents admitted i64 literals as JavaScript BigInt values.
         ;; They are not SSA identities and must not enter a CLJS hash-set
         ;; (which would attempt object identity bookkeeping on a primitive).
+        out (aarch64-fuse-zero-equality-branches target out)
         live-sources (->> out
                           (mapcat instruction-sources)
                           (filter gmir/vreg?)
@@ -1045,7 +1094,7 @@
     (:mir/dst instruction)))
 
 (def ^:private terminators
-  #{:mir/jump :mir/branch-zero :mir/return})
+  #{:mir/jump :mir/branch-zero :mir/branch-nonzero :mir/return})
 
 (defn- basic-blocks [instructions]
   (let [n (count instructions)
@@ -1083,7 +1132,7 @@
               (= op :mir/return) []
               (= op :mir/jump)
               [(get label->block (:mir/target (nth instructions end)))]
-              (= op :mir/branch-zero)
+              (contains? #{:mir/branch-zero :mir/branch-nonzero} op)
               (vec (remove nil?
                            [(when (< (inc index) (count blocks)) (inc index))
                             (get label->block
@@ -1202,7 +1251,8 @@
   (into #{}
         (keep (fn [{:keys [index end]}]
                 (let [op (:mir/op (nth instructions end))]
-                  (when (contains? #{:mir/jump :mir/branch-zero} op)
+                  (when (contains? #{:mir/jump :mir/branch-zero
+                                     :mir/branch-nonzero} op)
                     (let [target (:mir/target (nth instructions end))
                           target-block (get label->block target)]
                       (when (and (some? target-block) (<= target-block index))
@@ -1445,7 +1495,8 @@
 
 (defn- straight-line-call-program? [instructions]
   (and (some #(call-operation? (:mir/op %)) instructions)
-       (not-any? #(contains? #{:mir/label :mir/branch-zero :mir/jump :mir/phi}
+       (not-any? #(contains? #{:mir/label :mir/branch-zero :mir/branch-nonzero
+                               :mir/jump :mir/phi}
                              (:mir/op %))
                  instructions)))
 
@@ -2164,7 +2215,7 @@
                    :mir/arguments argument-registers}
                   (store-value instruction dst r0)]))
 
-              :mir/branch-zero
+              (:mir/branch-zero :mir/branch-nonzero)
               [(load-value instruction test r0)
                (assoc instruction :mir/test r0)]
 
@@ -2220,7 +2271,8 @@
                                {} instructions)]
     (boolean
      (some (fn [[index instruction]]
-             (and (contains? #{:mir/jump :mir/branch-zero} (:mir/op instruction))
+             (and (contains? #{:mir/jump :mir/branch-zero
+                               :mir/branch-nonzero} (:mir/op instruction))
                   (when-let [target (get label-index (:mir/target instruction))]
                     (<= target index))))
            (map-indexed vector instructions)))))
