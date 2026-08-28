@@ -1399,22 +1399,42 @@
   availability is checked separately at the producer, where interference is
   known."
   [instructions current-function parameter-homes indexes]
-  (reduce-kv
-   (fn [candidates index {:mir/keys [op callee arguments]}]
-     (if (and (= :mir/tail-call op)
-              (= current-function callee)
-              (= (count arguments) (count parameter-homes)))
-       (let [counts (frequencies arguments)]
-         (reduce (fn [out [value home]]
-                   (if (and (gmir/vreg? value)
-                            (= 1 (get counts value))
-                            (= [index] (get indexes value)))
-                     (assoc out value home)
-                     out))
-                 candidates
-                 (map vector arguments parameter-homes)))
-       candidates))
-   {} instructions))
+  (let [sites (->> instructions
+                   (keep-indexed
+                    (fn [index {:mir/keys [op callee] :as instruction}]
+                      (when (and (= :mir/tail-call op)
+                                 (= current-function callee))
+                        [index instruction])))
+                   vec)]
+    ;; Multiple recur sites need path-sensitive interference.  This deliberately
+    ;; small slice fails closed until the allocator owns that proof.
+    (if (= 1 (count sites))
+      (let [[index {:mir/keys [arguments]}] (first sites)
+            counts (frequencies arguments)]
+        (reduce (fn [out [value home]]
+                  (if (and (gmir/vreg? value)
+                           (= 1 (get counts value))
+                           (= [index] (get indexes value)))
+                    (assoc out value home)
+                    out))
+                {}
+                (map vector arguments parameter-homes)))
+      {})))
+
+(def ^:private direct-home-control-boundaries
+  #{:mir/label :mir/jump :mir/branch-zero :mir/branch-nonzero
+    :mir/return :mir/tail-call :mir/recur :mir/reentry})
+
+(defn- straight-line-to-recur?
+  "The suffix after a producer reaches its sole recur use without crossing a
+  control-flow or call boundary.  Register interference is handled separately;
+  this guard keeps the optimization local and fail-closed."
+  [instructions producer-index recur-index]
+  (every? (fn [instruction]
+            (and (not (call-operation? (:mir/op instruction)))
+                 (not (contains? direct-home-control-boundaries
+                                 (:mir/op instruction)))))
+          (subvec instructions (inc producer-index) recur-index)))
 
 (defn- next-use-of [indexes index value]
   (some (fn [use]
@@ -2070,6 +2090,7 @@
                         (when (contains? assigned dst)
                           (reject! :multiple-definition instruction))
                         (let [desired-home (get recur-home-candidates dst)
+                              recur-use (first (get indexes dst))
                               home-owner (when desired-home
                                            (some (fn [[value register]]
                                                    (when (= desired-home register)
@@ -2084,6 +2105,11 @@
                               ;; interference falls back to ordinary allocation
                               ;; and the proven parallel-copy scheduler.
                               direct-home (when (and desired-home
+                                                     (contains?
+                                                      schedulable-integer-operations
+                                                      (:mir/op instruction))
+                                                     (straight-line-to-recur?
+                                                      instructions index recur-use)
                                                      (or (nil? home-owner)
                                                          (and (contains? protected
                                                                          home-owner)

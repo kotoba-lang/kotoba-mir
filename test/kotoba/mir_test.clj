@@ -1263,6 +1263,105 @@
     (is (= [:aarch64/x0 :aarch64/x1]
            (:mir/arguments (peek duplicated))))))
 
+(deftest aarch64-direct-home-coalescing-does-not-pin-a-value-across-a-call
+  (let [i (gmir/vreg 380) acc (gmir/vreg 381)
+        one (gmir/vreg 382) next-i (gmir/vreg 383)
+        called (gmir/vreg 384) next-acc (gmir/vreg 385)
+        module {:gmir/version 3 :gmir/entry 'kernel
+                :gmir/functions
+                [{:gmir/name 'id :gmir/arity 1
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst (gmir/vreg 386)
+                    :gmir/index 0}
+                   {:gmir/op :gmir/return :gmir/value (gmir/vreg 386)}]}
+                 {:gmir/name 'kernel :gmir/arity 2
+                  :gmir/instructions
+                  [{:gmir/op :gmir/argument :gmir/dst i :gmir/index 0}
+                   {:gmir/op :gmir/argument :gmir/dst acc :gmir/index 1}
+                   {:gmir/op :gmir/label :gmir/id :test.label/again}
+                   {:gmir/op :gmir/constant :gmir/dst one :gmir/value 1}
+                   {:gmir/op :gmir/subtract :gmir/dst next-i
+                    :gmir/left i :gmir/right one}
+                   {:gmir/op :gmir/call :gmir/dst called
+                    :gmir/callee 'id :gmir/arguments [one]}
+                   {:gmir/op :gmir/add :gmir/dst next-acc
+                    :gmir/left acc :gmir/right called}
+                   {:gmir/op :gmir/tail-call :gmir/callee 'kernel
+                    :gmir/arguments [next-i next-acc]}]}]}
+        instructions (->> module (mir/select-target :aarch64)
+                          mir/allocate-registers :mir/functions second
+                          :mir/instructions)
+        boundary (first (filter #(= :mir/reentry (:mir/op %)) instructions))
+        recur-index (first (keep-indexed #(when (= :mir/recur (:mir/op %2)) %1)
+                                         instructions))
+        call-index (first (keep-indexed #(when (= :mir/call (:mir/op %2)) %1)
+                                        instructions))
+        moves (filter #(= :mir/move (:mir/op %))
+                      (subvec instructions (inc call-index) recur-index))]
+    (is (= [:aarch64/x0 :aarch64/x19] (:mir/parameters boundary)))
+    ;; NEXT-I is produced before ID and its home x0 is call-clobbered, so its
+    ;; x20->x0 copy must remain.  NEXT-ACC is produced after ID and writes x19
+    ;; directly, eliminating only the provably safe move.
+    (is (= [{:mir/op :mir/move
+             :mir/dst :aarch64/x0 :mir/src :aarch64/x20}]
+           (vec moves)))
+    (is (= :mir/recur (:mir/op (nth instructions recur-index))))))
+
+(deftest aarch64-direct-home-coalescing-fails-closed-for-multi-use-and-multi-site
+  (let [a (gmir/vreg 390) b (gmir/vreg 391) sum (gmir/vreg 392)
+        multi-use {:gmir/version 3 :gmir/entry 'step
+                   :gmir/functions
+                   [{:gmir/name 'step :gmir/arity 2
+                     :gmir/instructions
+                     [{:gmir/op :gmir/argument :gmir/dst a :gmir/index 0}
+                      {:gmir/op :gmir/argument :gmir/dst b :gmir/index 1}
+                      {:gmir/op :gmir/label :gmir/id :test.label/again}
+                      {:gmir/op :gmir/add :gmir/dst sum
+                       :gmir/left a :gmir/right b}
+                      ;; B is both a producer input and recur argument: the
+                      ;; edge is (b, a+b), not two independent last uses.
+                      {:gmir/op :gmir/tail-call :gmir/callee 'step
+                       :gmir/arguments [b sum]}]}]}
+        c (gmir/vreg 393) d (gmir/vreg 394)
+        one (gmir/vreg 395) left-c (gmir/vreg 396) left-d (gmir/vreg 397)
+        two (gmir/vreg 398) right-c (gmir/vreg 399) right-d (gmir/vreg 400)
+        multi-site {:gmir/version 3 :gmir/entry 'fork
+                    :gmir/functions
+                    [{:gmir/name 'fork :gmir/arity 2
+                      :gmir/instructions
+                      [{:gmir/op :gmir/argument :gmir/dst c :gmir/index 0}
+                       {:gmir/op :gmir/argument :gmir/dst d :gmir/index 1}
+                       {:gmir/op :gmir/branch-zero :gmir/test c
+                        :gmir/target :test.label/right}
+                       {:gmir/op :gmir/constant :gmir/dst one :gmir/value 1}
+                       {:gmir/op :gmir/add :gmir/dst left-c
+                        :gmir/left c :gmir/right one}
+                       {:gmir/op :gmir/add :gmir/dst left-d
+                        :gmir/left d :gmir/right one}
+                       {:gmir/op :gmir/tail-call :gmir/callee 'fork
+                        :gmir/arguments [left-c left-d]}
+                       {:gmir/op :gmir/label :gmir/id :test.label/right}
+                       {:gmir/op :gmir/constant :gmir/dst two :gmir/value 2}
+                       {:gmir/op :gmir/add :gmir/dst right-c
+                        :gmir/left c :gmir/right two}
+                       {:gmir/op :gmir/add :gmir/dst right-d
+                        :gmir/left d :gmir/right two}
+                       {:gmir/op :gmir/tail-call :gmir/callee 'fork
+                        :gmir/arguments [right-c right-d]}]}]}
+        allocate (fn [module]
+                   (->> module (mir/select-target :aarch64)
+                        mir/allocate-registers :mir/functions first
+                        :mir/instructions))
+        multi-use-instructions (allocate multi-use)
+        multi-site-instructions (allocate multi-site)]
+    (is (= :mir/recur (:mir/op (peek multi-use-instructions))))
+    (is (some #(= :mir/move (:mir/op %)) multi-use-instructions))
+    (is (= 2 (count (filter #(= :mir/recur (:mir/op %))
+                            multi-site-instructions))))
+    ;; Path-sensitive ownership is outside this local proof: both sites retain
+    ;; the established parallel-copy path.
+    (is (some #(= :mir/move (:mir/op %)) multi-site-instructions))))
+
 (deftest aarch64-self-recur-parallel-copies-handle-a-register-cycle
   (let [a (gmir/vreg 300) b (gmir/vreg 301)
         module {:gmir/version 3 :gmir/entry 'swap
