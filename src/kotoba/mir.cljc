@@ -1644,8 +1644,12 @@
         crossing (if calls? (set (keys (call-live-slots instructions))) #{})
         preserved-set (set (get preserved-registers target))
         return-register (get return-registers target)
+        ;; AArch64's preserved entry assignment is safe across its closed guest
+        ;; call ABI.  Keep x86-64 on the established scratch-first plan: native
+        ;; host-callback and self-tail helpers rely on that physical placement.
         entry (entry-argument-plan target pool instructions last-use
-                                   merge-slots {} crossing)]
+                                   merge-slots {}
+                                   (if (= :aarch64 target) crossing #{}))]
     (letfn [(spill-assigned [state value instruction]
               (let [register (get-in state [:assigned value])]
                 (when-not register

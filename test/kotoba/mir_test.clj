@@ -905,7 +905,7 @@
         {:gmir/predecessor :test.label/else-exit :gmir/value v4}]}
       {:gmir/op :gmir/return :gmir/value v5}]}]})
 
-(deftest v3-preserved-entry-value-is-valid-in-either-successor
+(deftest v3-aarch64-preserves-entry-value-and-x86-retains-scratch-plan
   (doseq [target mir/targets]
     (let [allocated (->> count-down-reload-module
                          (mir/select-target target)
@@ -916,11 +916,17 @@
           add (first (filter #(= :mir/add (:mir/op %)) else))]
       (is (= :call-live (:mir/frame-policy caller)) target)
       (is (some? add) target)
-      (is (contains? (set (get mir/preserved-registers target)) (:mir/left add))
-          (str target " keeps the call-crossing entry value in a callee-saved register"))
-      (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load} (:mir/op %))
-                    instructions)
-          (str target " does not materialize a slot for a preserved entry value"))
+      (if (= :aarch64 target)
+        (do
+          (is (contains? (set (get mir/preserved-registers target)) (:mir/left add))
+              "AArch64 keeps the call-crossing entry value in a callee-saved register")
+          (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load} (:mir/op %))
+                        instructions)
+              "AArch64 does not materialize a slot for a preserved entry value"))
+        (is (some #(and (= :mir/spill-load (:mir/op %))
+                        (= (:mir/dst %) (:mir/left add)))
+                  else)
+            "x86-64 retains the established scratch-first entry plan"))
       (is (seq (value-ops-unbacked-by-store instructions))
           (str target " must not fall back to all-vreg"))
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)) target))))
@@ -1013,7 +1019,7 @@
         (is (= [(first (get mir/call-argument-registers target))]
                (:mir/arguments tail)) target)))))
 
-(deftest v3-live-entry-arguments-start-in-preserved-registers
+(deftest v3-aarch64-live-entry-arguments-start-in-preserved-registers
   ;; This is the scalar shape produced for loop/recur with a real call in the
   ;; body.  `i` and `acc` enter in ABI registers but survive `id`; assigning
   ;; them scratch-first would store and reload both values on every iteration.
@@ -1062,11 +1068,13 @@
             instructions (:mir/instructions function)
             preserved (set (get mir/preserved-registers target))]
         (is (= :call-live (:mir/frame-policy function)) target)
-        (is (zero? (:mir/frame-slots function)) target)
-        (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
-                                  (:mir/op %))
-                      instructions) target)
-        (is (= 2 (count (mir/saved-registers target instructions))) target)
+        (is (= (if (= :aarch64 target) 0 2) (:mir/frame-slots function)) target)
+        (is (= (if (= :aarch64 target) 0 2)
+               (count (filter #(= :mir/spill-store (:mir/op %)) instructions))) target)
+        (is (= (if (= :aarch64 target) 0 2)
+               (count (filter #(= :mir/spill-load (:mir/op %)) instructions))) target)
+        (is (= (if (= :aarch64 target) 2 1)
+               (count (mir/saved-registers target instructions))) target)
         (is (every? preserved (mir/saved-registers target instructions)) target)
         (is (= :mir/tail-call (:mir/op (peek instructions))) target)))))
 
