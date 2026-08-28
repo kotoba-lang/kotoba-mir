@@ -2590,3 +2590,115 @@
                    :mir/instructions (:mir/instructions allocated)}))
               functions)}))
     (allocate-flat program)))
+
+(def ^:private bulk-fuel-pure-ops
+  "MIR operations that cannot call, touch memory/capabilities, or trap.  Keep
+  this allow-list closed: adding an operation is a proof obligation, not a
+  throughput tweak.  In particular, general quotient is absent; the selected
+  constant form is admitted separately only for divisors other than 0/-1."
+  #{:mir/argument :mir/constant
+    :mir/add :mir/subtract :mir/multiply
+    :mir/multiply-add :mir/multiply-subtract
+    :mir/bit-and :mir/bit-or :mir/bit-xor
+    :mir/shift-left :mir/shift-right-signed :mir/shift-right-unsigned
+    :mir/equal :mir/less-than :mir/greater-than
+    :mir/less-or-equal :mir/greater-or-equal
+    :mir/move})
+
+(defn- bulk-fuel-pure-instruction? [{:mir/keys [op divisor]}]
+  (or (contains? bulk-fuel-pure-ops op)
+      (and (= :mir/quotient-constant op)
+           (integer? divisor)
+           (not (contains? #{-1 0} divisor)))))
+
+(defn counted-self-recur-plan
+  "Return the conservative bulk-fuel proof for one selected virtual-MIR
+  function, or nil.
+
+  The admitted CFG has one latch branch, one base return, one body label and
+  one terminal self tail-call.  Its counter is an entry argument tested
+  directly for nonzero and the corresponding recur argument is exactly
+  `counter - 1`.  The remaining body is closed, pure and nontrapping.
+
+  This proves the iteration count for a non-negative runtime counter.  A
+  backend must retain ordinary per-edge charging for negative counters; this
+  function does not authorize wrapping a negative value into a bulk charge."
+  [{:mir/keys [name arity instructions]}]
+  (let [instructions (vec instructions)
+        indexed (map-indexed vector instructions)
+        branches (filterv (fn [[_ instruction]]
+                            (contains? #{:mir/branch-zero :mir/branch-nonzero}
+                                       (:mir/op instruction)))
+                          indexed)
+        labels (filterv (fn [[_ instruction]]
+                          (= :mir/label (:mir/op instruction)))
+                        indexed)
+        returns (filterv (fn [[_ instruction]]
+                           (= :mir/return (:mir/op instruction)))
+                         indexed)
+        tails (filterv (fn [[_ instruction]]
+                         (= :mir/tail-call (:mir/op instruction)))
+                       indexed)
+        arguments (->> instructions
+                       (filter #(= :mir/argument (:mir/op %)))
+                       (sort-by :mir/index)
+                       vec)
+        definitions (into {} (keep (fn [{:mir/keys [dst] :as instruction}]
+                                     (when dst [dst instruction])))
+                                   instructions)]
+    (when (and (symbol? name)
+               (integer? arity)
+               (= arity (count arguments))
+               (= (range arity) (map :mir/index arguments))
+               (= 1 (count branches))
+               (= 1 (count labels))
+               (= 1 (count returns))
+               (= 1 (count tails)))
+      (let [[[branch-index branch]] branches
+            [[label-index label]] labels
+            [[return-index _]] returns
+            [[tail-index tail]] tails
+            counter (:mir/test branch)
+            counter-index (first (keep-indexed
+                                  (fn [index argument]
+                                    (when (= counter (:mir/dst argument)) index))
+                                  arguments))
+            next-counter (when (some? counter-index)
+                           (nth (:mir/arguments tail) counter-index nil))
+            decrement (get definitions next-counter)
+            one (get definitions (:mir/right decrement))
+            structural-ops #{:mir/branch-nonzero :mir/return :mir/label
+                             :mir/tail-call}]
+        (when (and (= :mir/branch-nonzero (:mir/op branch))
+                   (= (inc branch-index) return-index)
+                   (= (+ branch-index 2) label-index)
+                   (= (:mir/target branch) (:mir/id label))
+                   (= tail-index (dec (count instructions)))
+                   (= name (:mir/callee tail))
+                   (= arity (count (:mir/arguments tail)))
+                   (some? counter-index)
+                   (= :mir/subtract (:mir/op decrement))
+                   (= counter (:mir/left decrement))
+                   (= :mir/constant (:mir/op one))
+                   (= 1 (:mir/value one))
+                   (every? (fn [instruction]
+                             (or (contains? structural-ops (:mir/op instruction))
+                                 (bulk-fuel-pure-instruction? instruction)))
+                           instructions))
+          {:counter-parameter counter-index
+           :runtime-domain :nonnegative-i64
+           :charge :entry-plus-exact-self-recur-count})))))
+
+(defn counted-self-recur-plans
+  "Map function names to proven counted/pure self-recur fuel plans.  PROGRAM
+  must already be selected virtual MIR so target-specific trapping operations
+  are visible to the proof."
+  [{:mir/keys [version registers functions] :as program}]
+  (validate! program)
+  (when-not (and (= 3 version) (= :virtual registers))
+    (reject! :bulk-fuel-analysis-requires-selected-virtual-module program))
+  (into {}
+        (keep (fn [{:mir/keys [name] :as function}]
+                (when-let [plan (counted-self-recur-plan function)]
+                  [name plan])))
+        functions))
