@@ -1348,9 +1348,11 @@
 (defn- entry-argument-plan
   "Materialize a function's ABI inputs as canonical self-markers followed by a
   bounded set of direct entry spills and a parallel copy into allocator
-  registers. Unused inputs need only their marker. Inputs beyond the allocator
-  profile are backed directly from their ABI registers and loaded lazily."
-  [target pool instructions last-use slot-base stable-slots]
+  registers. Values in PRESERVED-VALUES take the callee-saved tier first so an
+  entry argument that crosses a call is not immediately stored and reloaded.
+  Unused inputs need only their marker. Inputs beyond the allocator profile are
+  backed directly from their ABI registers and loaded lazily."
+  [target pool instructions last-use slot-base stable-slots preserved-values]
   (let [[arguments remaining] (split-with #(= :mir/argument (:mir/op %))
                                           instructions)]
     (when (some #(= :mir/argument (:mir/op %)) remaining)
@@ -1360,13 +1362,29 @@
           allocator-registers pool
           abi-registers (get call-argument-registers target)
           used (filterv #(contains? last-use (:mir/dst %)) arguments)]
-      (let [register-count (min (count used) (count allocator-registers))
-            register-inputs (subvec used 0 register-count)
-            spill-inputs (subvec used register-count)
-            assigned (into {}
-                           (map (fn [instruction register]
-                                  [(:mir/dst instruction) register])
-                                register-inputs allocator-registers))
+      (let [scratch-count (count (get physical-registers target))
+            initial {:scratch (vec (take scratch-count allocator-registers))
+                     :preserved (vec (drop scratch-count allocator-registers))
+                     :register-inputs [] :spill-inputs [] :assigned {}}
+            {:keys [register-inputs spill-inputs assigned] :as placement}
+            (reduce
+             (fn [state instruction]
+               (let [value (:mir/dst instruction)
+                     primary (if (contains? preserved-values value)
+                               :preserved :scratch)
+                     secondary (if (= primary :preserved) :scratch :preserved)
+                     tier (cond
+                            (seq (get state primary)) primary
+                            (seq (get state secondary)) secondary
+                            :else nil)]
+                 (if tier
+                   (let [register (first (get state tier))]
+                     (-> state
+                         (update tier #(vec (rest %)))
+                         (update :register-inputs conj [instruction register])
+                         (assoc-in [:assigned value] register)))
+                   (update state :spill-inputs conj instruction))))
+             initial used)
             input-register (fn [instruction]
                              (or (get abi-registers (:mir/index instruction))
                                  (reject! :spill-required instruction)))
@@ -1384,12 +1402,11 @@
                             :mir/src (input-register instruction)
                             :mir/slot (get entry-spills (:mir/dst instruction))})
                          spill-inputs)
-            copies (mapv (fn [instruction]
-                           {:mir/dst (get assigned (:mir/dst instruction))
+            copies (mapv (fn [[instruction register]]
+                           {:mir/dst register
                             :mir/src (input-register instruction)})
                          register-inputs)
-            scheduled (schedule-parallel-copies copies next-slot)
-            owned (set (vals assigned))]
+            scheduled (schedule-parallel-copies copies next-slot)]
         {:argument-count (count arguments)
          :remaining remaining
          :assigned assigned
@@ -1397,10 +1414,8 @@
          :stable-slots (merge stable-slots entry-spills)
          :stable-slot-count next-slot
          :temp-slot next-slot
-         :free (vec (remove owned (take (count (get physical-registers target))
-                                        allocator-registers)))
-         :reserve (vec (remove owned (drop (count (get physical-registers target))
-                                           allocator-registers)))
+         :free (:scratch placement)
+         :reserve (:preserved placement)
          :instructions (into markers (concat stores (:instructions scheduled)))
          :used-temp? (:used-temp? scheduled)}))))
 
@@ -1446,7 +1461,7 @@
         allocator-registers (allocator-pool target {:leaf? false})
         return-register (get return-registers target)]
     (let [entry (entry-argument-plan target allocator-registers instructions
-                                     last-use (count call-slots) call-slots)
+                                     last-use (count call-slots) call-slots #{})
           slots (:stable-slots entry)
           temp-slot (:temp-slot entry)]
       (when (> (+ (:stable-slot-count entry) 1) 4095)
@@ -1630,7 +1645,7 @@
         preserved-set (set (get preserved-registers target))
         return-register (get return-registers target)
         entry (entry-argument-plan target pool instructions last-use
-                                   merge-slots {})]
+                                   merge-slots {} crossing)]
     (letfn [(spill-assigned [state value instruction]
               (let [register (get-in state [:assigned value])]
                 (when-not register
