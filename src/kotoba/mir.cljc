@@ -1391,6 +1391,53 @@
              (distinct (filter gmir/vreg? (sources instruction)))))
    {} instructions))
 
+(defn- direct-recur-home-candidates
+  "Map a self-tail argument SSA value to its exact allocator-owned parameter
+  home when that recur is the value's sole use.  A repeated argument is not a
+  candidate: one producer cannot define two homes, and the parallel-copy
+  scheduler must retain responsibility for duplicating it.  Register
+  availability is checked separately at the producer, where interference is
+  known."
+  [instructions current-function parameter-homes indexes]
+  (let [sites (->> instructions
+                   (keep-indexed
+                    (fn [index {:mir/keys [op callee arguments] :as instruction}]
+                      (when (and (= :mir/tail-call op)
+                                 (= current-function callee)
+                                 (= (count arguments)
+                                    (count parameter-homes)))
+                        [index instruction])))
+                   vec)]
+    ;; Multiple recur sites need path-sensitive interference.  This deliberately
+    ;; small slice fails closed until the allocator owns that proof.
+    (if (= 1 (count sites))
+      (let [[index {:mir/keys [arguments]}] (first sites)
+            counts (frequencies arguments)]
+        (reduce (fn [out [value home]]
+                  (if (and (gmir/vreg? value)
+                           (= 1 (get counts value))
+                           (= [index] (get indexes value)))
+                    (assoc out value home)
+                    out))
+                {}
+                (map vector arguments parameter-homes)))
+      {})))
+
+(def ^:private direct-home-control-boundaries
+  #{:mir/label :mir/jump :mir/branch-zero :mir/branch-nonzero
+    :mir/return :mir/tail-call :mir/recur :mir/reentry})
+
+(defn- straight-line-to-recur?
+  "The suffix after a producer reaches its sole recur use without crossing a
+  control-flow or call boundary.  Register interference is handled separately;
+  this guard keeps the optimization local and fail-closed."
+  [instructions producer-index recur-index]
+  (every? (fn [instruction]
+            (and (not (call-operation? (:mir/op instruction)))
+                 (not (contains? direct-home-control-boundaries
+                                 (:mir/op instruction)))))
+          (subvec instructions (inc producer-index) recur-index)))
+
 (defn- next-use-of [indexes index value]
   (some (fn [use]
           (when (>= use index) use))
@@ -1805,7 +1852,12 @@
                              parameter-homes
                              (some #(and (= :mir/tail-call (:mir/op %))
                                          (= current-function (:mir/callee %)))
-                                   instructions))]
+                                   instructions))
+        recur-home-candidates
+        (if direct-reentry?
+          (direct-recur-home-candidates instructions current-function
+                                        parameter-homes indexes)
+          {})]
     (letfn [(spill-assigned [state value instruction]
               (let [register (get-in state [:assigned value])]
                 (when-not register
@@ -2039,7 +2091,35 @@
                       (do
                         (when (contains? assigned dst)
                           (reject! :multiple-definition instruction))
-                        (let [dying-left (when (and (= prefer :scratch)
+                        (let [desired-home (get recur-home-candidates dst)
+                              recur-use (first (get indexes dst))
+                              home-owner (when desired-home
+                                           (some (fn [[value register]]
+                                                   (when (= desired-home register)
+                                                     value))
+                                                 assigned))
+                              ;; A definition may overwrite its requested home
+                              ;; only when the register is free, or when the old
+                              ;; value is an operand whose final CFG use is this
+                              ;; very instruction.  Physical integer operations
+                              ;; read all operands before writing DST, so this
+                              ;; preserves simultaneous SSA semantics.  Any
+                              ;; interference falls back to ordinary allocation
+                              ;; and the proven parallel-copy scheduler.
+                              direct-home (when (and desired-home
+                                                     (contains?
+                                                      schedulable-integer-operations
+                                                      (:mir/op instruction))
+                                                     (straight-line-to-recur?
+                                                      instructions index recur-use)
+                                                     (or (nil? home-owner)
+                                                         (and (contains? protected
+                                                                         home-owner)
+                                                              (= index
+                                                                 (get last-use
+                                                                      home-owner)))))
+                                            desired-home)
+                              dying-left (when (and (= prefer :scratch)
                                                     (gmir/vreg? (:mir/left instruction))
                                                     (= index (get last-use
                                                                   (:mir/left instruction))))
@@ -2047,16 +2127,21 @@
                               from-primary (if (= prefer :preserved)
                                              (first reserve)
                                              (first free))
-                              register (or from-primary dying-left)
+                              register (or direct-home from-primary dying-left)
                               [state register]
                               (if register
                                 [{:assigned assigned
-                                  :free (if (and from-primary (= prefer :scratch))
-                                          (vec (rest free))
-                                          free)
-                                  :reserve (if (and from-primary (= prefer :preserved))
-                                             (vec (rest reserve))
-                                             reserve)
+                                  :free (if direct-home
+                                          (vec (remove #{direct-home} free))
+                                          (if (and from-primary (= prefer :scratch))
+                                            (vec (rest free))
+                                            free))
+                                  :reserve (if direct-home
+                                             (vec (remove #{direct-home} reserve))
+                                             (if (and from-primary
+                                                      (= prefer :preserved))
+                                               (vec (rest reserve))
+                                               reserve))
                                   :backed backed
                                   :next-slot next-slot :out out :index index
                                   :def-position def-position}
