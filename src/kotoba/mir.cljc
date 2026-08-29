@@ -40,6 +40,24 @@
                (when leaf? (get leaf-registers target))
                (get preserved-registers target))))
 
+(defn- x86-quotient-steered-pool
+  "The x86-64 pool with RAX and RDX demoted to last-resort scratch.
+
+  `imul r10` inside every constant division writes RDX:RAX, so a value the
+  allocator parks there is saved and restored around each quotient -- four
+  stack operations a time, thirty-two per narrow-kernel call, measured as the
+  largest x86 mechanism behind the gcc deficit (amu
+  docs/codegen-coscientist.md, iterations 40-42). Demoting rather than
+  removing keeps capacity: under pressure the registers are still handed out,
+  and the emitter's liveness scan then keeps their saves. Leaf functions
+  only: the call paths split pools by POSITION in `rebuild-pool-lists`, and a
+  reordered prefix would misclassify the tiers there."
+  [leaf?]
+  (vec (concat [:x86-64/rcx :x86-64/r8]
+               (when leaf? (get leaf-registers :x86-64))
+               [:x86-64/rax :x86-64/rdx]
+               (get preserved-registers :x86-64))))
+
 (defn saved-registers
   "Which preserved registers a physical instruction sequence names, in pool
   order, so a frame can save them in order and restore them in reverse.
@@ -1686,7 +1704,13 @@
   (let [last-use (last-uses instructions)
         indexes (use-indexes instructions)
         calls? (boolean (some #(call-operation? (:mir/op %)) instructions))
-        pool (allocator-pool target {:leaf? (not calls?)})
+        quotients? (boolean (some #(contains? #{:mir/quotient-constant
+                                                :mir/quotient}
+                                              (:mir/op %))
+                                  instructions))
+        pool (if (and (= :x86-64 target) quotients? (not calls?))
+               (x86-quotient-steered-pool true)
+               (allocator-pool target {:leaf? (not calls?)}))
         crossing (if calls? (set (keys (call-live-slots instructions))) #{})
         preserved-set (set (get preserved-registers target))
         return-register (get return-registers target)

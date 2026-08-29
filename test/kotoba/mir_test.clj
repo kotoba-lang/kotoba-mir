@@ -1564,6 +1564,37 @@
                                   (:mir/op %))
                       (:mir/instructions caller)) target)))))
 
+(deftest x86-quotient-leaf-steers-values-away-from-rax-and-rdx
+  (let [module (fn [body-ops]
+                 {:gmir/version 3 :gmir/entry 'main
+                  :gmir/functions
+                  [{:gmir/name 'main :gmir/arity 1
+                    :gmir/instructions
+                    (vec (concat
+                          [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}]
+                          body-ops
+                          [{:gmir/op :gmir/add :gmir/dst v2
+                            :gmir/left v0 :gmir/right v1}
+                           {:gmir/op :gmir/return :gmir/value v2}]))}]})
+        quotient [{:gmir/op :gmir/constant :gmir/dst v3 :gmir/value 7}
+                  {:gmir/op :gmir/quotient :gmir/dst v1
+                   :gmir/left v0 :gmir/right v3}]
+        plain [{:gmir/op :gmir/multiply :gmir/dst v1
+                :gmir/left v0 :gmir/right v0}]
+        allocated (fn [m] (-> (mir/select-target :x86-64 m)
+                              mir/allocate-registers
+                              :mir/functions first :mir/instructions))
+        regs (fn [instructions]
+               (set (keep :mir/dst instructions)))]
+    ;; the argument crosses the quotient; steered, it must not sit in RAX or
+    ;; RDX, which imul r10 clobbers (the emitter would have to save them)
+    (is (not-any? #{:x86-64/rax :x86-64/rdx}
+                  (regs (allocated (module quotient))))
+        "a quotient leaf hands out RCX/R8 first: nothing lives in RAX or RDX")
+    ;; a leaf with no quotient keeps the established pool order
+    (is (contains? (regs (allocated (module plain))) :x86-64/rax)
+        "a quotient-free leaf still allocates RAX first")))
+
 (deftest v3-call-liveness-preserves-one-value-across-two-calls
   (let [module {:gmir/version 3
                 :gmir/entry 'main
