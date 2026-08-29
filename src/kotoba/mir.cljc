@@ -1637,156 +1637,6 @@
                          definitions)]
     (into {} (map-indexed (fn [slot [value _]] [value slot]) crossing))))
 
-(defn- straight-line-call-program? [instructions]
-  (and (some #(call-operation? (:mir/op %)) instructions)
-       (not-any? #(contains? #{:mir/label :mir/branch-zero :mir/branch-nonzero
-                               :mir/jump :mir/phi}
-                             (:mir/op %))
-                 instructions)))
-
-(defn- allocate-call-live
-  "Allocate a straight-line call function while materializing only values live
-  across a call. Register pressure outside calls deliberately falls back to the
-  conservative all-vreg allocator rather than weakening correctness."
-  [{:mir/keys [version target registers instructions] :as program}]
-  (when-not (= :virtual registers)
-    (reject! :registers-not-virtual program))
-  (let [last-use (last-uses instructions)
-        call-slots (call-live-slots instructions)
-        allocator-registers (allocator-pool target {:leaf? false})
-        return-register (get return-registers target)]
-    (let [entry (entry-argument-plan target allocator-registers instructions
-                                     last-use (count call-slots) call-slots #{})
-          slots (:stable-slots entry)
-          temp-slot (:temp-slot entry)]
-      (when (> (+ (:stable-slot-count entry) 1) 4095)
-        (reject! :spill-frame-too-large
-                 {:frame-slots (:stable-slot-count entry)}))
-      (letfn [(expire [state index just-defined]
-                (let [expired (filter #(or (= index (get last-use %))
-                                           (and (= just-defined %)
-                                                (not (contains? last-use %))))
-                                      (keys (:assigned state)))]
-                  (expire-assigned-in-pool target state expired)))
-            (ensure-source [state instruction value]
-              (if (contains? (:assigned state) value)
-                state
-                (let [slot (get slots value)
-                      register (first (:free state))]
-                  (when-not (and (some? slot) register
-                                 (contains? (:materialized state) value))
-                    (reject! :spill-required instruction))
-                  (-> state
-                      (assoc-in [:assigned value] register)
-                      (update :free #(vec (rest %)))
-                      (update :out conj {:mir/op :mir/spill-load
-                                         :mir/dst register :mir/slot slot})))))
-            (ensure-sources [state instruction values]
-              (reduce (fn [out value] (ensure-source out instruction value))
-                      state (distinct values)))
-            (allocate-dst [state instruction dst]
-              (if-not (gmir/vreg? dst)
-                state
-                (let [register (first (:free state))]
-                  (when-not register
-                    (reject! :spill-required instruction))
-                  (-> state
-                      (assoc-in [:assigned dst] register)
-                      (update :free #(vec (rest %)))))))]
-      (let [result
-            (reduce
-             (fn [state [index {:mir/keys [op dst arguments] :as instruction}]]
-               (if (call-operation? op)
-                 (let [missing (remove #(or (contains? (:assigned state) %)
-                                            (and (contains? slots %)
-                                                 (contains? (:materialized state) %)))
-                                       arguments)
-                       _ (when (seq missing)
-                           (reject! :spill-required instruction))
-                       live-values (->> (keys (:assigned state))
-                                        (filter #(> (get last-use % -1) index))
-                                        ordered-vregs)
-                       to-store (filter #(and (contains? slots %)
-                                              (not (contains? (:materialized state) %)))
-                                        live-values)
-                       stores (mapv (fn [value]
-                                      {:mir/op :mir/spill-store
-                                       :mir/src (get-in state [:assigned value])
-                                       :mir/slot (get slots value)})
-                                    to-store)
-                       call-registers (subvec (argument-registers-for-call target instruction)
-                                              0 (count arguments))
-                       copies (->> (map vector arguments call-registers)
-                                   (keep (fn [[value register]]
-                                           (when-let [source (get-in state
-                                                                     [:assigned value])]
-                                             {:mir/dst register :mir/src source})))
-                                   vec)
-                       scheduled (schedule-parallel-copies copies temp-slot)
-                       loads (->> (map vector arguments call-registers)
-                                  (keep (fn [[value register]]
-                                          (when-not (contains? (:assigned state) value)
-                                            {:mir/op :mir/spill-load
-                                             :mir/dst register
-                                             :mir/slot (get slots value)})))
-                                  vec)
-                       call (cond-> {:mir/op op :mir/arguments call-registers}
-                              (not= :mir/tail-call op)
-                              (assoc :mir/dst return-register)
-                              (contains? #{:mir/call :mir/tail-call} op)
-                              (assoc :mir/callee (:mir/callee instruction))
-                              (= :mir/runtime-call op)
-                              (assoc :mir/runtime (:mir/runtime instruction)
-                                     :mir/context-offset
-                                     (:mir/context-offset instruction))
-                              (= :mir/capability-call op)
-                              (assoc :mir/capability (:mir/capability instruction)
-                                     :mir/kind (:mir/kind instruction)
-                                     :mir/context-offset
-                                     (:mir/context-offset instruction)))
-                       state (-> state
-                                 (update :out into stores)
-                                 (update :out into (:instructions scheduled))
-                                 (update :out into loads)
-                                 (update :out conj call)
-                                 (update :materialized into to-store)
-                                 (update :used-temp? #(or % (:used-temp? scheduled)))
-                                 (assoc :assigned (if (gmir/vreg? dst)
-                                                    {dst return-register} {}))
-                                 (assoc :free (vec (remove #{return-register}
-                                                          allocator-registers))))]
-                   (expire state index dst))
-                 (let [source-values (filter gmir/vreg? (sources instruction))
-                       state (ensure-sources state instruction source-values)
-                       state (allocate-dst state instruction dst)
-                       allocated (reduce-kv
-                                  (fn [out key value]
-                                    (assoc out key
-                                    (cond
-                                      (gmir/vreg? value)
-                                      (get-in state [:assigned value])
-                                      (and (= key :mir/arguments) (vector? value))
-                                      (mapv #(get-in state [:assigned %]) value)
-                                      :else value)))
-                                  {} instruction)
-                       state (update state :out conj allocated)]
-                   (expire state index dst))))
-             {:assigned (:assigned entry) :free (:free entry)
-              :reserve (:reserve entry)
-              :materialized (set (keys (:entry-spills entry)))
-              :used-temp? (:used-temp? entry) :out (:instructions entry)}
-             (map-indexed (fn [offset instruction]
-                            [(+ (:argument-count entry) offset) instruction])
-                          (:remaining entry)))
-            frame-slots (+ (:stable-slot-count entry)
-                           (if (:used-temp? result) 1 0))]
-        (validate-flat!
-         {:mir/version version
-          :mir/target target
-          :mir/registers :physical
-          :mir/frame-slots frame-slots
-          :mir/instructions (:out result)}))))))
-
 (defn- store-at-definition
   "Splice the spill-store in immediately after VALUE was defined, rather than
   leaving it where the register ran out.
@@ -2571,18 +2421,19 @@
                 (let [virtual {:mir/version 3 :mir/target target
                                :mir/registers :virtual
                                :mir/instructions instructions}
+                      ;; Straight-line call functions previously took
+                      ;; allocate-call-live first, which routes every
+                      ;; call-crossing value through a stable slot. The
+                      ;; linear scanner keeps preserved-register assignments
+                      ;; alive across calls and moves a call-crossing call
+                      ;; result into the preserved tier -- measured on the
+                      ;; qualified call fixture as +6.7% over the slot shape
+                      ;; (amu docs/codegen-coscientist.md, iteration 20-21).
+                      ;; The scanner already carries its own conservative
+                      ;; all-vreg fallback.
                       [allocated frame-policy]
-                      (if (straight-line-call-program? instructions)
-                        (try
-                          [(schedule-program (allocate-call-live virtual))
-                           :call-live]
-                          (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) error
-                            (if (= :spill-required (:problem (ex-data error)))
-                              (allocate-with-policy
-                               (vary-meta virtual assoc ::current-function name))
-                              (throw error))))
-                        (allocate-with-policy
-                         (vary-meta virtual assoc ::current-function name)))]
+                      (allocate-with-policy
+                       (vary-meta virtual assoc ::current-function name))]
                   {:mir/name name
                    :mir/arity arity
                    :mir/frame-slots (:mir/frame-slots allocated)

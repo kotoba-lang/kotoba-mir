@@ -903,11 +903,11 @@
       (is (= :allocator (:mir/frame-policy callee)) target)
       (is (zero? (:mir/frame-slots callee)) target)
       (is (= :call-live (:mir/frame-policy caller)) target)
-      (is (= 1 (:mir/frame-slots caller)) target)
-      (is (= 1 (count (filter #(= :mir/spill-store (:mir/op %))
-                              (:mir/instructions caller)))) target)
-      (is (= 1 (count (filter #(= :mir/spill-load (:mir/op %))
-                              (:mir/instructions caller)))) target)
+      (is (zero? (:mir/frame-slots caller)) target)
+      (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
+                                (:mir/op %))
+                    (:mir/instructions caller))
+          [target "the call-crossing value is preserved, not spilled"])
       (is (= (get mir/return-registers target) (:mir/dst call)) target)
       (is (= [(first (get mir/call-argument-registers target))]
              (:mir/arguments call)) target)
@@ -1590,11 +1590,18 @@
                                  mir/allocate-registers)))
             instructions (:mir/instructions caller)]
         (is (= :call-live (:mir/frame-policy caller)) target)
-        (is (= 1 (:mir/frame-slots caller)) target)
-        (is (= 1 (count (filter #(= :mir/spill-store (:mir/op %)) instructions)))
-            target)
-        (is (= 1 (count (filter #(= :mir/spill-load (:mir/op %)) instructions)))
-            target)
+        (is (zero? (:mir/frame-slots caller)) target)
+        (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
+                                  (:mir/op %))
+                      instructions)
+            [target "a call-crossing value lives in a preserved register,
+                     not a stack slot (measured +6.7% on the qualified call
+                     fixture, amu docs/codegen-coscientist.md iteration 21)"])
+        (is (contains? (set (get mir/preserved-registers target))
+                       (:mir/dst (first (filter #(= :mir/constant (:mir/op %))
+                                                instructions))))
+            [target "the crossing constant takes the preserved tier at its
+                     definition"])
         (is (= 2 (count (filter #(= :mir/call (:mir/op %)) instructions)))
             target)))))
 
@@ -1695,7 +1702,7 @@
                            (:mir/dst (first loads))) target))
           (is (not-any? gmir/vreg? (tree-seq coll? seq function)) target))))))
 
-(deftest v3-excess-entry-argument-reuses-its-call-live-slot
+(deftest v3-excess-entry-argument-crosses-in-a-preserved-register
   (let [arguments (mapv gmir/vreg (range 5))
         call-result (gmir/vreg 5)
         result (gmir/vreg 6)
@@ -1733,13 +1740,18 @@
                                  mir/allocate-registers)))
             instructions (:mir/instructions caller)]
         (is (= :call-live (:mir/frame-policy caller)) target)
-        (is (= 1 (:mir/frame-slots caller)) target)
-        (is (= [0] (mapv :mir/slot
-                         (filter #(= :mir/spill-store (:mir/op %)) instructions)))
+        (is (zero? (:mir/frame-slots caller)) target)
+        (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
+                                  (:mir/op %))
+                      instructions)
             target)
-        (is (= [0] (mapv :mir/slot
-                         (filter #(= :mir/spill-load (:mir/op %)) instructions)))
-            target)))))
+        (is (some (fn [{:mir/keys [op dst]}]
+                    (and (= :mir/move op)
+                         (contains? (set (get mir/preserved-registers target))
+                                    dst)))
+                  instructions)
+            [target "the fifth argument crosses the call in a preserved
+                     register instead of a reused stable slot"])))))
 
 (deftest v3-physical-call-contract-fails-closed
   (let [allocated (->> scalar-call-module
@@ -1835,13 +1847,29 @@
                           first)
             instructions (:mir/instructions function)]
         (is (= :call-live (:mir/frame-policy function)) target)
-        (is (= 1 (:mir/frame-slots function)) target)
-        (is (= [0] (mapv :mir/slot
-                         (filter #(= :mir/spill-store (:mir/op %))
-                                 instructions))) target)
-        (is (= [0] (mapv :mir/slot
-                         (filter #(= :mir/spill-load (:mir/op %))
-                                 instructions))) target)))))
+        (if (= :aarch64 target)
+          ;; AArch64 entry arguments that cross a call take the preserved
+          ;; tier at entry, so the host boundary moves nothing.
+          (do
+            (is (zero? (:mir/frame-slots function)) target)
+            (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
+                                      (:mir/op %))
+                          instructions)
+                target)
+            (is (contains? (set (get mir/preserved-registers target))
+                           (:mir/left
+                            (first (filter #(= :mir/add (:mir/op %))
+                                           instructions))))
+                [target "the argument survives the host boundary in a
+                         preserved register"]))
+          ;; x86-64 keeps the scratch-first entry plan (native host-callback
+          ;; and self-tail helpers rely on that physical placement), so a
+          ;; crossing entry argument still rides one stable slot there.
+          (do
+            (is (= 1 (:mir/frame-slots function)) target)
+            (is (= [0] (mapv :mir/slot
+                             (filter #(= :mir/spill-store (:mir/op %))
+                                     instructions))) target)))))))
 
 (deftest v2-control-flow-validates-with-host-calls
   (doseq [target mir/targets
