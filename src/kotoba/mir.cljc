@@ -41,21 +41,25 @@
                (get preserved-registers target))))
 
 (defn- x86-quotient-steered-pool
-  "The x86-64 pool with RAX and RDX demoted to last-resort scratch.
+  "The x86-64 pool with RAX and RDX removed.
 
   `imul r10` inside every constant division writes RDX:RAX, so a value the
   allocator parks there is saved and restored around each quotient -- four
   stack operations a time, thirty-two per narrow-kernel call, measured as the
   largest x86 mechanism behind the gcc deficit (amu
-  docs/codegen-coscientist.md, iterations 40-42). Demoting rather than
-  removing keeps capacity: under pressure the registers are still handed out,
-  and the emitter's liveness scan then keeps their saves. Leaf functions
-  only: the call paths split pools by POSITION in `rebuild-pool-lists`, and a
-  reordered prefix would misclassify the tiers there."
+  docs/codegen-coscientist.md, iterations 40-42). An earlier version only
+  DEMOTED the pair, arguing that under pressure the extra capacity was worth
+  the saves; the hardware counters refuted that (iteration 48: kernel_deep
+  retires at IPC 5.74 -- the retire width is the wall, and every value parked
+  in RAX/RDX buys its residency with four stack operations per quotient it
+  crosses, where a spill slot pays two moves once). Under exclusion the
+  pressure lands on spill slots instead and every quotient's saves elide.
+  Leaf functions only: the call paths split pools by POSITION in
+  `rebuild-pool-lists`, and a reordered prefix would misclassify the tiers
+  there."
   [leaf?]
   (vec (concat [:x86-64/rcx :x86-64/r8]
                (when leaf? (get leaf-registers :x86-64))
-               [:x86-64/rax :x86-64/rdx]
                (get preserved-registers :x86-64))))
 
 (defn saved-registers

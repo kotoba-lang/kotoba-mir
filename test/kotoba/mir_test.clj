@@ -1593,7 +1593,28 @@
         "a quotient leaf hands out RCX/R8 first: nothing lives in RAX or RDX")
     ;; a leaf with no quotient keeps the established pool order
     (is (contains? (regs (allocated (module plain))) :x86-64/rax)
-        "a quotient-free leaf still allocates RAX first")))
+        "a quotient-free leaf still allocates RAX first")
+    ;; under pressure the exclusion holds: enough simultaneously-live values
+    ;; to exhaust the steered pool used to overflow INTO RAX/RDX (the demoted
+    ;; tier), and every quotient they crossed bought four stack operations.
+    ;; Now the overflow lands on spill slots and nothing lives in the pair.
+    (let [live (mapv (fn [i] (gmir/vreg (+ 10 i))) (range 14))
+          sums (mapv (fn [i] (gmir/vreg (+ 30 i))) (range 14))
+          pressure (vec (concat
+                         [{:gmir/op :gmir/constant :gmir/dst v3 :gmir/value 7}]
+                         (map (fn [w prev]
+                                {:gmir/op :gmir/add :gmir/dst w
+                                 :gmir/left prev :gmir/right v0})
+                              live (cons v0 live))
+                         [{:gmir/op :gmir/quotient :gmir/dst v5
+                           :gmir/left v0 :gmir/right v3}]
+                         (map (fn [dst w prev]
+                                {:gmir/op :gmir/add :gmir/dst dst
+                                 :gmir/left prev :gmir/right w})
+                              (conj (pop sums) v1) live (cons v5 sums))))]
+      (is (not-any? #{:x86-64/rax :x86-64/rdx}
+                    (regs (allocated (module pressure))))
+          "pressure spills rather than reaching RAX/RDX"))))
 
 (deftest v3-call-liveness-preserves-one-value-across-two-calls
   (let [module {:gmir/version 3
