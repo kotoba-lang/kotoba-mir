@@ -1708,7 +1708,17 @@
                                                 :mir/quotient}
                                               (:mir/op %))
                                   instructions))
-        pool (if (and (= :x86-64 target) quotients? (not calls?))
+        ;; Straight-line only: `rebuild-pool-lists` splits pools by POSITION
+        ;; at label boundaries too (`drop-backed-assignments`), and a
+        ;; reordered prefix misclassifies the tiers there -- measured as two
+        ;; new variant-sroa failures before this guard existed.
+        straight-line? (not-any? #(contains? #{:mir/label :mir/branch-zero
+                                               :mir/branch-nonzero :mir/jump
+                                               :mir/phi}
+                                             (:mir/op %))
+                                 instructions)
+        pool (if (and (= :x86-64 target) quotients? (not calls?)
+                      straight-line?)
                (x86-quotient-steered-pool true)
                (allocator-pool target {:leaf? (not calls?)}))
         crossing (if calls? (set (keys (call-live-slots instructions))) #{})
