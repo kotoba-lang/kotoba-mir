@@ -1144,7 +1144,7 @@
         (is (= [(first (get mir/call-argument-registers target))]
                (:mir/arguments tail)) target)))))
 
-(deftest v3-aarch64-live-entry-arguments-start-in-preserved-registers
+(deftest v3-self-tail-guest-call-entry-arguments-start-in-preserved-registers
   ;; This is the scalar shape produced for loop/recur with a real call in the
   ;; body.  `i` and `acc` enter in ABI registers but survive `id`; assigning
   ;; them scratch-first would store and reload both values on every iteration.
@@ -1193,16 +1193,13 @@
             instructions (:mir/instructions function)
             preserved (set (get mir/preserved-registers target))]
         (is (= :call-live (:mir/frame-policy function)) target)
-        (is (= (if (= :aarch64 target) 0 2) (:mir/frame-slots function)) target)
-        (is (= (if (= :aarch64 target) 0 2)
-               (count (filter #(= :mir/spill-store (:mir/op %)) instructions))) target)
-        (is (= (if (= :aarch64 target) 0 2)
-               (count (filter #(= :mir/spill-load (:mir/op %)) instructions))) target)
-        (is (= (if (= :aarch64 target) 2 1)
-               (count (mir/saved-registers target instructions))) target)
+        (is (zero? (:mir/frame-slots function)) target)
+        (is (not-any? #(contains? #{:mir/spill-store :mir/spill-load}
+                                  (:mir/op %))
+                      instructions) target)
+        (is (= 2 (count (mir/saved-registers target instructions))) target)
         (is (every? preserved (mir/saved-registers target instructions)) target)
-        (is (= (if (= :aarch64 target) :mir/recur :mir/tail-call)
-               (:mir/op (peek instructions))) target)
+        (is (= :mir/recur (:mir/op (peek instructions))) target)
         (when (= :aarch64 target)
           (let [boundary (first (filter #(= :mir/reentry (:mir/op %))
                                         instructions))
@@ -1407,7 +1404,7 @@
            (mapv :mir/op edge)))
     (is (pos? (:mir/frame-slots function)))))
 
-(deftest direct-reentry-is-aarch64-self-only-and-spill-fallback-stays-public
+(deftest direct-reentry-is-self-only-and-spill-fallback-stays-public
   (let [a (gmir/vreg 320)
         non-self {:gmir/version 3 :gmir/entry 'caller
                   :gmir/functions
@@ -1428,6 +1425,24 @@
         (is (= :mir/tail-call (:mir/op (peek instructions))) target)
         (is (not-any? #(contains? #{:mir/reentry :mir/recur} (:mir/op %))
                       instructions) target)))
+    (let [result (gmir/vreg 322)
+          callback-self
+          {:gmir/version 3 :gmir/entry 'callback-loop
+           :gmir/functions
+           [{:gmir/name 'callback-loop :gmir/arity 1
+             :gmir/instructions
+             [{:gmir/op :gmir/argument :gmir/dst a :gmir/index 0}
+              {:gmir/op :gmir/runtime-call :gmir/dst result
+               :gmir/runtime :vector-count :gmir/arguments [a]}
+              {:gmir/op :gmir/tail-call :gmir/callee 'callback-loop
+               :gmir/arguments [a]}]}]}
+          instructions (->> callback-self (mir/select-target :x86-64)
+                            mir/allocate-registers :mir/functions first
+                            :mir/instructions)]
+      (is (= :mir/tail-call (:mir/op (peek instructions))))
+      (is (not-any? #(contains? #{:mir/reentry :mir/recur} (:mir/op %))
+                    instructions)
+          "callback-bearing x86 self recursion retains the proven public ABI path"))
     (with-scratch-tier-only
       (let [args (mapv #(gmir/vreg (+ 330 %)) (range 5))
             pressure {:gmir/version 3 :gmir/entry 'pressure
