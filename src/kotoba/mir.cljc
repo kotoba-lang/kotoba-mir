@@ -268,8 +268,7 @@
                    (contains? #{:mir/spill-load :mir/spill-store :mir/move} op))
           (reject! :physical-operation-in-virtual-program instruction))
         (when (and (contains? #{:mir/reentry :mir/recur} op)
-                   (or (= :virtual registers) (not= :aarch64 target)
-                       (not= 3 version)))
+                   (or (= :virtual registers) (not= 3 version)))
           (reject! :direct-reentry-profile-violation instruction))
         (when (and (= :virtual registers)
                    (contains? #{:mir/multiply-add :mir/multiply-subtract} op))
@@ -562,8 +561,7 @@
                             true))
                         (map-indexed vector instructions))]
             (when-not (if (seq recurs)
-                        (and (= :aarch64 target)
-                             (= 1 (count reentries))
+                        (and (= 1 (count reentries))
                              (= arity (count (:mir/parameters (first reentries))))
                              (= arity
                                 (count (distinct
@@ -1728,19 +1726,39 @@
         crossing (if calls? (set (keys (call-live-slots instructions))) #{})
         preserved-set (set (get preserved-registers target))
         return-register (get return-registers target)
-        ;; AArch64's preserved entry assignment is safe across its closed guest
-        ;; call ABI.  Keep x86-64 on the established scratch-first plan: native
-        ;; host-callback and self-tail helpers rely on that physical placement.
+        self-tail? (and current-function
+                        (some #(and (= :mir/tail-call (:mir/op %))
+                                    (= current-function (:mir/callee %)))
+                              instructions))
+        host-calls? (boolean
+                     (some #(contains? #{:mir/runtime-call
+                                         :mir/capability-call}
+                                       (:mir/op %))
+                           instructions))
+        x86-direct-reentry? (and (= :x86-64 target)
+                                 self-tail?
+                                 (not host-calls?))
+        ;; AArch64 already admits every call-crossing entry into its preserved
+        ;; tier.  The x86 slice is deliberately narrower: only parameters of a
+        ;; self-tail function with no runtime/capability callback. Its direct
+        ;; recur edge stays inside the one frame, so every parameter home must
+        ;; survive ordinary guest calls in the body. Callback-bearing helpers
+        ;; retain the established x86 scratch-and-slot plan that the earlier
+        ;; broad change regressed.
+        preserved-entry-values
+        (if (= :aarch64 target)
+          crossing
+          (if x86-direct-reentry?
+            (into #{}
+                  (keep #(when (= :mir/argument (:mir/op %)) (:mir/dst %)))
+                  instructions)
+            #{}))
         entry (entry-argument-plan target pool instructions last-use
-                                   merge-slots {}
-                                   (if (= :aarch64 target) crossing #{}))
+                                   merge-slots {} preserved-entry-values)
         parameter-homes (:parameter-homes entry)
-        direct-reentry? (and (= :aarch64 target)
-                             current-function
-                             parameter-homes
-                             (some #(and (= :mir/tail-call (:mir/op %))
-                                         (= current-function (:mir/callee %)))
-                                   instructions))
+        direct-reentry? (and self-tail?
+                             (or (= :aarch64 target) x86-direct-reentry?)
+                             parameter-homes)
         recur-home-candidates
         (if direct-reentry?
           (direct-recur-home-candidates instructions current-function
