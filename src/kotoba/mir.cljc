@@ -93,7 +93,18 @@
    :string-byte-length 72 :string=? 112 :string-concat 120
    :string-substring 136 :string-code-point-at 144
    :vector-new-empty 152 :vector-conj 160 :vector-count 168
-   :vector-at 176 :vector-assoc 184 :vector-drop 192})
+   :vector-at 176 :vector-assoc 184 :vector-drop 192
+   ;; ABI v4 (superproject ADR-2609010200). The context struct these offsets
+   ;; index is `kexe_context_v4` in amu's tools/kexe_loader.c, whose
+   ;; `_Static_assert`s pin the same two numbers from the C side; the version
+   ;; moved because a guest bakes an offset in, so appending to a v3 host
+   ;; would have v4-compiled code jump through uninitialised memory.
+   ;;
+   ;; Both are past 127, so x86-64 encodes `call qword ptr [r9+disp32]` --
+   ;; the same branch offsets 128 and above have taken since string-substring.
+   ;; AArch64's LDR unsigned-offset imm12 reaches 8*4095, so both are ordinary
+   ;; there.
+   :vector-alloc 200 :vector-assoc-in-place 208})
 
 (def capability-argument-registers
   {:x86-64 {:i64 [:x86-64/rdx]

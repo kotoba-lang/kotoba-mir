@@ -1880,6 +1880,49 @@
                                                          instructions)))))
               target))))))
 
+;; ABI v4 (superproject ADR-2609010200). The point of the pair is that the
+;; store and the copy are DIFFERENT slots: if selection sent `vector-assoc!`
+;; to 184 the program would still compute the right answer -- a copy and an
+;; in-place write are indistinguishable on a handle that is dead afterwards --
+;; and the only thing lost would be the reason the operation exists. So this
+;; pins the offsets AND their difference, not just that each resolves.
+(deftest abi-v4-vector-operations-select-their-own-context-offsets
+  (doseq [[runtime arity offset] [[:vector-alloc 1 200]
+                                  [:vector-assoc-in-place 3 208]]]
+    (let [arguments (mapv #(gmir/vreg (inc %)) (range arity))
+          program {:gmir/version 1
+                   :gmir/instructions
+                   (into (vec (map-indexed (fn [i r] {:gmir/op :gmir/argument
+                                                      :gmir/dst r :gmir/index i})
+                                           arguments))
+                         [{:gmir/op :gmir/runtime-call :gmir/dst v0
+                           :gmir/runtime runtime :gmir/arguments arguments}
+                          {:gmir/op :gmir/return :gmir/value v0}])}]
+      (doseq [target mir/targets]
+        (let [selected (mir/select-target target program)
+              call (first (filter #(= :mir/runtime-call (:mir/op %))
+                                  (:mir/instructions selected)))]
+          (is (= offset (:mir/context-offset call)) [runtime target])
+          (is (= runtime (:mir/runtime call)) [runtime target])
+          (testing "the selected offset cannot drift"
+            (is (thrown? clojure.lang.ExceptionInfo
+                         (mir/validate!
+                          (update selected :mir/instructions
+                                  (fn [instructions]
+                                    (mapv #(if (= :mir/runtime-call (:mir/op %))
+                                             (assoc % :mir/context-offset
+                                                    (if (= offset 200) 208 200))
+                                             %)
+                                          instructions)))))
+                [runtime target])))))))
+
+(deftest the-in-place-store-does-not-share-the-copying-slot
+  (is (not= (:vector-assoc mir/runtime-context-offsets)
+            (:vector-assoc-in-place mir/runtime-context-offsets)))
+  (is (= 184 (:vector-assoc mir/runtime-context-offsets)))
+  (is (= 208 (:vector-assoc-in-place mir/runtime-context-offsets)))
+  (is (= 200 (:vector-alloc mir/runtime-context-offsets))))
+
 (deftest immutable-data-address-selection-preserves-content
   (let [program {:gmir/version 1
                  :gmir/instructions
