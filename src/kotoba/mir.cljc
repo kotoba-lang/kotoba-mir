@@ -166,6 +166,30 @@
    :mir/f64-greater-than #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/f64-greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/f64-unordered #{:mir/op :mir/dst :mir/left :mir/right}
+   ;; f32: binary32 (kotoba-lang ADR-kotoba-floating-point-on-native). Same
+   ;; operand shapes and the same one-word vreg as the f64 family above -- an
+   ;; f32 travels as its binary32 pattern sign-extended from bit 31.
+   ;;
+   ;; No f32-min/f32-max, and the absence is the decision: x86 MINSS/MAXSS
+   ;; return the SECOND operand when either input is NaN while AArch64 FMIN and
+   ;; the KIR oracle return the NaN, so :mir/f64-min above already means two
+   ;; things on the two targets. Recorded upstream, not inherited here.
+   :mir/f32-add #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-subtract #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-multiply #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-divide #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-sqrt #{:mir/op :mir/dst :mir/input}
+   :mir/f32-equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-less-than #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-less-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-greater-than #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-unordered #{:mir/op :mir/dst :mir/left :mir/right}
+   ;; Width conversions -- one source in, one value out, exactly like f32-sqrt.
+   :mir/f32-to-f64 #{:mir/op :mir/dst :mir/input}
+   :mir/f64-to-f32 #{:mir/op :mir/dst :mir/input}
+   :mir/i64-to-f32 #{:mir/op :mir/dst :mir/input}
+   :mir/i64-to-f64 #{:mir/op :mir/dst :mir/input}
    :mir/kernel-load-u8 #{:mir/op :mir/dst :mir/base :mir/length
                          :mir/index :mir/maximum}
    :mir/kernel-store-u8 #{:mir/op :mir/dst :mir/base :mir/length
@@ -703,6 +727,16 @@
                             :mir/f64-sqrt :mir/f64-equal :mir/f64-less-than
                             :mir/f64-less-or-equal :mir/f64-greater-than
                             :mir/f64-greater-or-equal :mir/f64-unordered
+                            ;; f32: value-producing exactly as the f64 family
+                            ;; is -- one word out, no clobber the f64 twins do
+                            ;; not already have.
+                            :mir/f32-add :mir/f32-subtract :mir/f32-multiply
+                            :mir/f32-divide :mir/f32-sqrt :mir/f32-equal
+                            :mir/f32-less-than :mir/f32-less-or-equal
+                            :mir/f32-greater-than :mir/f32-greater-or-equal
+                            :mir/f32-unordered
+                            :mir/f32-to-f64 :mir/f64-to-f32
+                            :mir/i64-to-f32 :mir/i64-to-f64
                             :mir/kernel-load-u8 :mir/kernel-store-u8
                             :mir/kernel-load-u32 :mir/kernel-store-u32
                             :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32
@@ -2422,6 +2456,11 @@
                :mir/f64-equal :mir/f64-less-than :mir/f64-less-or-equal
                :mir/f64-greater-than :mir/f64-greater-or-equal
                :mir/f64-unordered
+               ;; f32: two sources in, one value out, same as the f64 twins.
+               :mir/f32-add :mir/f32-subtract :mir/f32-multiply
+               :mir/f32-divide :mir/f32-equal :mir/f32-less-than
+               :mir/f32-less-or-equal :mir/f32-greater-than
+               :mir/f32-greater-or-equal :mir/f32-unordered
                :mir/equal :mir/less-than :mir/greater-than
                :mir/less-or-equal :mir/greater-or-equal)
               [(load-value instruction left r0)
@@ -2429,7 +2468,12 @@
                {:mir/op op :mir/dst r0 :mir/left r0 :mir/right r1}
                (store-value instruction dst r0)]
 
-              :mir/f64-sqrt
+              ;; One source in, one value out. The f32 conversions join
+              ;; f64-sqrt here rather than getting their own arm: the shape is
+              ;; the same and the WIDTH lives entirely in the encoder.
+              (:mir/f64-sqrt :mir/f32-sqrt
+               :mir/f32-to-f64 :mir/f64-to-f32
+               :mir/i64-to-f32 :mir/i64-to-f64)
               [(load-value instruction input r0)
                {:mir/op op :mir/dst r0 :mir/input r0}
                (store-value instruction dst r0)]
