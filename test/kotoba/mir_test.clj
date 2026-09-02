@@ -3485,3 +3485,107 @@
     (is (= [] (:mir/arguments instruction)))
     (testing "no operands, so no preserved register and no frame save"
       (is (empty? (mir/saved-registers :x86-64 (:mir/instructions allocated)))))))
+
+(defn- spilling-self-tail-module
+  "A direct-reentry loop whose body puts enough values across one guest call
+  that the allocator has to evict the loop counter from its parameter home and
+  back it with a frame slot. `i` is read at the top (the exit test) and again at
+  the bottom (the recur argument), exactly as `round-block` reads it in
+  `os/aiueos/kotoba/aiueos/sha256.kotoba`.
+
+  WIDTH is how many values are made live across the call. It is a parameter so
+  the fixture can say what it needs rather than hard-code a register count that
+  a later pool change would silently satisfy."
+  [width]
+  (let [i (gmir/vreg 0)
+        acc (gmir/vreg 1)
+        zero (gmir/vreg 2)
+        done? (gmir/vreg 3)
+        stepped (gmir/vreg 4)
+        one (gmir/vreg 5)
+        next-i (gmir/vreg 6)
+        crossing (mapv #(gmir/vreg (+ 100 %)) (range width))
+        sums (mapv #(gmir/vreg (+ 200 %)) (range width))]
+    {:gmir/version 3
+     :gmir/entry 'loop-helper
+     :gmir/functions
+     [{:gmir/name 'id :gmir/arity 1
+       :gmir/instructions
+       [{:gmir/op :gmir/argument :gmir/dst (gmir/vreg 10) :gmir/index 0}
+        {:gmir/op :gmir/return :gmir/value (gmir/vreg 10)}]}
+      {:gmir/name 'loop-helper :gmir/arity 2
+       :gmir/instructions
+       (vec (concat
+             [{:gmir/op :gmir/argument :gmir/dst i :gmir/index 0}
+              {:gmir/op :gmir/argument :gmir/dst acc :gmir/index 1}
+              {:gmir/op :gmir/constant :gmir/dst zero :gmir/value 0}
+              {:gmir/op :gmir/equal :gmir/dst done? :gmir/left i :gmir/right zero}
+              {:gmir/op :gmir/branch-zero :gmir/test done?
+               :gmir/target :test.label/continue}
+              {:gmir/op :gmir/return :gmir/value acc}
+              {:gmir/op :gmir/label :gmir/id :test.label/continue}]
+             ;; every crossing value is defined before the call and consumed
+             ;; after it
+             (map-indexed (fn [index dst]
+                            {:gmir/op :gmir/constant :gmir/dst dst
+                             :gmir/value (inc index)})
+                          crossing)
+             [{:gmir/op :gmir/call :gmir/dst stepped :gmir/callee 'id
+               :gmir/arguments [(first crossing)]}]
+             (map-indexed (fn [index dst]
+                            {:gmir/op :gmir/add :gmir/dst dst
+                             :gmir/left (if (zero? index) stepped (nth sums (dec index)))
+                             :gmir/right (nth crossing index)})
+                          sums)
+             ;; `i` is read again here, after the call -- this is the load that
+             ;; must answer with THIS iteration's counter
+             [{:gmir/op :gmir/constant :gmir/dst one :gmir/value 1}
+              {:gmir/op :gmir/subtract :gmir/dst next-i :gmir/left i :gmir/right one}
+              {:gmir/op :gmir/tail-call :gmir/callee 'loop-helper
+               :gmir/arguments [next-i (peek sums)]}]))}]}))
+
+(deftest direct-reentry-spills-a-parameter-home-inside-the-loop
+  ;; aiueos ADR-0150 / kotoba-native da3b56b (x86 direct self reentry).
+  ;;
+  ;; `store-at-definition` splices a spill store at the value's definition
+  ;; because, under SSA, a definition dominates every use. The recur edge
+  ;; breaks that: it REDEFINES the parameter homes and branches back to the
+  ;; `:mir/reentry` marker, which sits after the entry plan. A store left at
+  ;; the entry plan runs once, before the loop; the reloads inside the body run
+  ;; every iteration and answer with the value the parameter had on ENTRY.
+  ;;
+  ;; Measured on `os/aiueos/kotoba/aiueos/sha256.kotoba`: `round-block` stored
+  ;; its counter once at `0x199b` and reloaded it at `0x1d29` to compute
+  ;; `i + 1`, so `i` was 1 forever, `(= i 64)` never held, and the kernel
+  ;; object spun until its fuel guard trapped with #UD.
+  (doseq [target mir/targets]
+    (let [width 20
+          function (second (:mir/functions
+                            (->> (spilling-self-tail-module width)
+                                 (mir/select-target target)
+                                 mir/allocate-registers)))
+          instructions (:mir/instructions function)
+          index-of (fn [op] (first (keep-indexed #(when (= op (:mir/op %2)) %1)
+                                                 instructions)))
+          reentry (index-of :mir/reentry)
+          stores (keep-indexed #(when (= :mir/spill-store (:mir/op %2)) %1)
+                               instructions)
+          loads (keep-indexed #(when (= :mir/spill-load (:mir/op %2)) %1)
+                              instructions)]
+      (testing (str target " -- the fixture must actually exercise the shape")
+        ;; Evidence floor: a run that produced no reentry, or no spill at all,
+        ;; measured nothing. Without this the assertion below is vacuously true
+        ;; the moment the pool grows.
+        (is (some? reentry)
+            (str target ": the fixture stopped producing a direct reentry edge"))
+        (is (pos? (count stores))
+            (str target ": the fixture stopped spilling; raise `width`"))
+        (is (pos? (count loads))
+            (str target ": the fixture stopped reloading; raise `width`")))
+      (testing (str target " -- nothing a loop iteration reads is written once, before the loop")
+        (doseq [store stores]
+          (is (> store reentry)
+              (str target ": a spill store at index " store
+                   " runs before the reentry marker at index " reentry
+                   ", so it executes once while the loop body reloads that slot"
+                   " on every iteration")))))))
