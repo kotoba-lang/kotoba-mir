@@ -3169,3 +3169,120 @@
   ;; value across a sequence that pushes and pops four general registers.
   (is (not (contains? @#'kotoba.mir/schedulable-integer-operations
                       :mir/kernel-dot-f32))))
+
+;; boot-lit ───────────────────────────────────────────────────────────────────
+
+(def ^:private v5 (gmir/vreg 5))
+(def ^:private v6 (gmir/vreg 6))
+(def ^:private v7 (gmir/vreg 7))
+(def ^:private v8 (gmir/vreg 8))
+
+(defn- boot-lit-wide-call
+  "A function whose FIRST instruction is a constant and whose second is an
+  entry argument. That is `:non-prefix-argument`, which the linear scanner
+  refuses with `:spill-required` -- so the whole function takes the
+  conservative all-vreg path, which is the one that owns the argument-register
+  vector this test is about."
+  [action arity]
+  (let [operands (mapv gmir/vreg (range 1 (inc arity)))]
+    {:gmir/version 3 :gmir/entry 'main
+     :gmir/functions
+     [{:gmir/name 'main :gmir/arity 1
+       :gmir/instructions
+       (vec (concat
+             [{:gmir/op :gmir/constant :gmir/dst (first operands) :gmir/value 7}
+              {:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}]
+             (map (fn [register value]
+                    {:gmir/op :gmir/constant :gmir/dst register :gmir/value value})
+                  (rest operands) (range 1 arity))
+             [{:gmir/op :gmir/x86-privileged :gmir/dst (gmir/vreg 20)
+               :gmir/action action :gmir/arguments operands}
+              {:gmir/op :gmir/return :gmir/value (gmir/vreg 20)}]))}]}))
+
+(defn- boot-lit-privileged [allocated]
+  (first (filter #(= :mir/x86-privileged (:mir/op %))
+                 (get-in allocated [:mir/functions 0 :mir/instructions]))))
+
+(deftest boot-lit-privileged-arguments-draw-scratch-then-preserved
+  (is (= (vec (concat (get mir/physical-registers :x86-64)
+                      (get mir/preserved-registers :x86-64)))
+         (mir/privileged-argument-registers :x86-64)))
+  (testing "the vector is at least as wide as the widest privileged action"
+    (doseq [target mir/targets]
+      (is (<= (apply max (vals gmir/x86-privileged-action-arities))
+              (count (mir/privileged-argument-registers target)))
+          target)))
+  (testing "and every register in the second half is callee-saved"
+    ;; RBX, RBP, RDI, RSI and R12-R15 are preserved under Microsoft x64. That
+    ;; is what lets an operand parked in one survive the firmware call it is
+    ;; an operand to; an operand in the scratch tier is saved and reloaded by
+    ;; the encoder instead.
+    (is (= #{:x86-64/rbx :x86-64/r12 :x86-64/r13 :x86-64/r14 :x86-64/r15}
+           (set (drop 4 (mir/privileged-argument-registers :x86-64)))))))
+
+(deftest boot-lit-an-eight-operand-firmware-call-allocates
+  (let [allocated (mir/allocate-registers
+                   (mir/select-target :x86-64 (boot-lit-wide-call :uefi-call6 8)))
+        operation (boot-lit-privileged allocated)]
+    (is (= :uefi-call6 (:mir/action operation)))
+    (is (= (subvec (mir/privileged-argument-registers :x86-64) 0 8)
+           (:mir/arguments operation)))
+    (is (= 8 (count (distinct (:mir/arguments operation)))))
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
+
+(deftest boot-lit-a-six-operand-firmware-call-allocates
+  (let [allocated (mir/allocate-registers
+                   (mir/select-target :x86-64 (boot-lit-wide-call :uefi-call4 6)))
+        operation (boot-lit-privileged allocated)]
+    (is (= :uefi-call4 (:mir/action operation)))
+    (is (= (subvec (mir/privileged-argument-registers :x86-64) 0 6)
+           (:mir/arguments operation)))))
+
+(deftest boot-lit-a-narrow-action-still-costs-no-frame-save
+  ;; The scratch tier comes FIRST, so `:uefi-call2` names no preserved
+  ;; register and `mir/saved-registers` finds nothing to save. Reversing the
+  ;; two halves would still allocate and would quietly add a save/restore pair
+  ;; to every kernel that writes a port.
+  (let [allocated (mir/allocate-registers
+                   (mir/select-target :x86-64 (boot-lit-wide-call :uefi-call2 4)))
+        instructions (get-in allocated [:mir/functions 0 :mir/instructions])]
+    (is (= (get mir/physical-registers :x86-64)
+           (:mir/arguments (boot-lit-privileged allocated))))
+    (is (empty? (mir/saved-registers :x86-64 instructions)))))
+
+(defn- boot-lit-literal-program [encoding content]
+  {:gmir/version 1
+   :gmir/instructions
+   [{:gmir/op :gmir/rodata-address :gmir/dst v0
+     :gmir/content content :gmir/rodata-encoding encoding}
+    {:gmir/op :gmir/return :gmir/value v0}]})
+
+(deftest boot-lit-rodata-selection-preserves-content-and-encoding
+  (let [selected (mir/select-target
+                  :x86-64 (boot-lit-literal-program :utf-16le-nul "AIUEOS"))
+        allocated (mir/allocate-registers selected)
+        literal (first (:mir/instructions allocated))]
+    (is (= :mir/rodata-address (:mir/op literal)))
+    (is (= "AIUEOS" (:mir/content literal)))
+    (is (= :utf-16le-nul (:mir/rodata-encoding literal)))
+    (is (= "x86-64" (namespace (:mir/dst literal))))))
+
+(deftest boot-lit-rodata-is-x86-only-and-says-so
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"rodata-address-target-mismatch"
+       (mir/select-target
+        :aarch64 (boot-lit-literal-program :guid-mixed-endian
+                                           "5B1B31A1-9562-11D2-8E3F-00A0C969723B")))))
+
+(deftest boot-lit-mir-re-derives-literal-wellformedness
+  ;; Selection copies content through; if only kotoba-gmir checked it, a
+  ;; hand-built MIR program would still get a pool entry and an address.
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"invalid-rodata-content"
+       (mir/validate!
+        {:mir/version 1 :mir/target :x86-64 :mir/registers :virtual
+         :mir/instructions
+         [{:mir/op :mir/rodata-address :mir/dst v0
+           :mir/content "5B1B31A1-9562-11D2-8E3F-00A0C96972" ; two digits short
+           :mir/rodata-encoding :guid-mixed-endian}
+          {:mir/op :mir/return :mir/value v0}]}))))
