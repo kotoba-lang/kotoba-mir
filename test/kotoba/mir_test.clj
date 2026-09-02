@@ -584,6 +584,80 @@
         (is (some #(= mir-op (:mir/op %)) (:mir/instructions allocated)))
         (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))))
 
+(deftest memwidth-families-select-and-allocate-on-both-targets
+  (let [prefix [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                {:gmir/op :gmir/argument :gmir/dst v1 :gmir/index 1}
+                {:gmir/op :gmir/argument :gmir/dst v2 :gmir/index 2}
+                {:gmir/op :gmir/argument :gmir/dst v3 :gmir/index 3}]
+        store? #(re-find #"store" (name %))
+        operation (fn [op maximum]
+                    (cond-> {:gmir/op op :gmir/dst v4 :gmir/base v0
+                             :gmir/length v1 :gmir/index v2
+                             :gmir/maximum maximum}
+                      (store? op) (assoc :gmir/stored v3)))
+        cases (concat
+               (for [op gmir/kernel-window-operations
+                     maximum gmir/kernel-window-maxima]
+                 (operation op maximum))
+               (for [op gmir/slice-operations]
+                 (operation op gmir/slice-item-limit)))]
+    (is (= 40 (count cases)) "8 window operations x 4 tiers, plus 8 slice operations")
+    (doseq [target mir/targets, op cases]
+      (let [program {:gmir/version 1
+                     :gmir/instructions
+                     (conj prefix op {:gmir/op :gmir/return :gmir/value v4})}
+            selected (mir/select-target target program)
+            allocated (mir/allocate-registers selected)
+            mir-op (keyword "mir" (name (:gmir/op op)))]
+        (is (= mir-op (get-in selected [:mir/instructions 4 :mir/op]))
+            (str target " " (:gmir/op op) " " (:gmir/maximum op)))
+        (is (some #(= mir-op (:mir/op %)) (:mir/instructions allocated))
+            (str target " " (:gmir/op op)))
+        (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))
+            (str target " " (:gmir/op op)))))
+    ;; And the conservative all-vreg path, which is a SECOND `case op` with a
+    ;; closed default (`:unsupported-spill-operation`). The scanner above never
+    ;; reaches it, so without this arm an operation could be missing from the
+    ;; spill selection and every assertion above would still pass -- measured:
+    ;; deleting `:mir/slice-store-u64` from that case left the suite green.
+    (doseq [target mir/targets, op cases]
+      (with-scratch-tier-only
+        (let [program {:gmir/version 1
+                       :gmir/instructions
+                       (conj prefix op {:gmir/op :gmir/return :gmir/value v4})}
+              allocated (mir/allocate-registers (mir/select-target target program))
+              mir-op (keyword "mir" (name (:gmir/op op)))]
+          (is (some #(= mir-op (:mir/op %)) (:mir/instructions allocated))
+              (str "spill path: " target " " (:gmir/op op)))
+          (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))
+              (str "spill path: " target " " (:gmir/op op))))))))
+
+(deftest memwidth-bounds-are-one-table-shared-with-gmir
+  (testing "the two IR layers agree on the families and their ceilings"
+    (is (= (set (map #(keyword "mir" (name %)) gmir/kernel-window-operations))
+           mir/kernel-window-operations))
+    (is (= (set (map #(keyword "mir" (name %)) gmir/slice-operations))
+           mir/slice-operations))
+    (is (= gmir/kernel-window-maxima mir/kernel-window-maxima))
+    (is (= gmir/slice-item-limit mir/slice-item-limit)))
+  (testing "a maximum from the wrong family is refused at MIR too"
+    (doseq [[op maximum] [[:mir/kernel-load-u16 65537]
+                          [:mir/kernel-store-u64 0]
+                          [:mir/slice-load-u32 16384]]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (mir/validate!
+                    {:mir/version 1 :mir/target :x86-64 :mir/registers :virtual
+                     :mir/instructions
+                     [{:mir/op :mir/argument :mir/dst v0 :mir/index 0}
+                      {:mir/op :mir/argument :mir/dst v1 :mir/index 1}
+                      {:mir/op :mir/argument :mir/dst v2 :mir/index 2}
+                      (cond-> {:mir/op op :mir/dst v4 :mir/base v0
+                               :mir/length v1 :mir/index v2
+                               :mir/maximum maximum}
+                        (re-find #"store" (name op)) (assoc :mir/stored v3))
+                      {:mir/op :mir/return :mir/value v4}]}))
+          (str op " " maximum)))))
+
 (deftest x86-privileged-selection-is-target-scoped-and-allocatable
   (let [program {:gmir/version 3 :gmir/entry 'main
                  :gmir/functions
