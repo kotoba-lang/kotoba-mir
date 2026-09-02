@@ -680,6 +680,32 @@
                           #"x86-privileged-target-mismatch"
                           (mir/select-target :aarch64 program)))))
 
+(deftest boot-four-argument-privileged-action-allocates-in-the-scratch-tier
+  ;; boot: `:uefi-call2` takes four operands. The conservative expansion used
+  ;; to slice the first two of the scratch tier, so this threw out of `subvec`
+  ;; rather than allocating. `with-scratch-tier-only` forces the conservative
+  ;; path, which is the one that had the ceiling.
+  (with-scratch-tier-only
+    (let [program {:gmir/version 3 :gmir/entry 'main
+                   :gmir/functions
+                   [{:gmir/name 'main :gmir/arity 0
+                     :gmir/instructions
+                     [{:gmir/op :gmir/constant :gmir/dst v0 :gmir/value 1}
+                      {:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 2}
+                      {:gmir/op :gmir/constant :gmir/dst v2 :gmir/value 3}
+                      {:gmir/op :gmir/constant :gmir/dst v3 :gmir/value 4}
+                      {:gmir/op :gmir/x86-privileged :gmir/dst v4
+                       :gmir/action :uefi-call2
+                       :gmir/arguments [v0 v1 v2 v3]}
+                      {:gmir/op :gmir/return :gmir/value v4}]}]}
+          allocated (mir/allocate-registers (mir/select-target :x86-64 program))
+          operation (first (filter #(= :mir/x86-privileged (:mir/op %))
+                                   (get-in allocated [:mir/functions 0
+                                                      :mir/instructions])))]
+      (is (= :uefi-call2 (:mir/action operation)))
+      (is (= (get mir/physical-registers :x86-64) (:mir/arguments operation)))
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))))))
+
 (deftest allocation-spills-deterministically-when-the-scratch-profile-is-exhausted
   (with-scratch-tier-only
     (let [registers (mapv gmir/vreg (range 11))
