@@ -2267,8 +2267,30 @@
              temp-slot (when (:used-temp? entry) (:temp-slot entry))
              ;; Everything the entry plan assigned is in place by the end of its
              ;; own instructions, so that is where a store of one of them goes.
+             ;;
+             ;; One instruction later when this function has a direct reentry
+             ;; edge. `store-at-definition` is allowed to splice a store at a
+             ;; definition because, under SSA, a definition dominates every use
+             ;; of its value -- but the recur edge REDEFINES the parameter homes
+             ;; and jumps back to the `:mir/reentry` marker, which is placed
+             ;; after the entry plan. A store left at the entry plan therefore
+             ;; runs once, before the loop, while the reloads inside the body
+             ;; run every iteration: from the second iteration on they answer
+             ;; with the value the parameter had on ENTRY.
+             ;;
+             ;; Measured 2026-09-02 on `os/aiueos/kotoba/aiueos/sha256.kotoba`
+             ;; compiled for x86_64-aiueos-kernel-v1: `round-block` stored its
+             ;; loop counter once at the entry plan and reloaded it inside the
+             ;; loop to compute `i + 1`, so `i` was 1 on every iteration after
+             ;; the first, `(= i 64)` never held, and the object spun until the
+             ;; fuel guard trapped with #UD (aiueos ADR-0150).
+             ;;
+             ;; Placing it after the marker puts the store at the top of the
+             ;; loop body, where the parameter home register is correct on the
+             ;; entry path AND on every back edge.
              def-position (zipmap (keys (:assigned entry))
-                                  (repeat (count (:instructions entry))))]
+                                  (repeat (cond-> (count (:instructions entry))
+                                            direct-reentry? inc)))]
         (if-let [instruction (first remaining)]
           (if (call-operation? (:mir/op instruction))
             (let [state (emit-call {:assigned assigned :free free :reserve reserve
