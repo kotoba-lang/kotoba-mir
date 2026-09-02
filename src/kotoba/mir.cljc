@@ -174,6 +174,35 @@
                           :mir/index :mir/maximum}
    :mir/kernel-store-u32 #{:mir/op :mir/dst :mir/base :mir/length
                            :mir/index :mir/stored :mir/maximum}
+   ;; memwidth: the two remaining MMIO transfer widths, and the slice family.
+   ;; Every one carries exactly the fields its u8/u32 sibling does -- the width
+   ;; is in the operation name, and for the slice family the only other
+   ;; difference is that `:mir/index` counts elements rather than bytes.
+   :mir/kernel-load-u16 #{:mir/op :mir/dst :mir/base :mir/length
+                          :mir/index :mir/maximum}
+   :mir/kernel-store-u16 #{:mir/op :mir/dst :mir/base :mir/length
+                           :mir/index :mir/stored :mir/maximum}
+   :mir/kernel-load-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                          :mir/index :mir/maximum}
+   :mir/kernel-store-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                           :mir/index :mir/stored :mir/maximum}
+   :mir/slice-load-u8 #{:mir/op :mir/dst :mir/base :mir/length
+                        :mir/index :mir/maximum}
+   :mir/slice-store-u8 #{:mir/op :mir/dst :mir/base :mir/length
+                         :mir/index :mir/stored :mir/maximum}
+   :mir/slice-load-u16 #{:mir/op :mir/dst :mir/base :mir/length
+                         :mir/index :mir/maximum}
+   :mir/slice-store-u16 #{:mir/op :mir/dst :mir/base :mir/length
+                          :mir/index :mir/stored :mir/maximum}
+   :mir/slice-load-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                         :mir/index :mir/maximum}
+   :mir/slice-store-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                          :mir/index :mir/stored :mir/maximum}
+   :mir/slice-load-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                         :mir/index :mir/maximum}
+   :mir/slice-store-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                          :mir/index :mir/stored :mir/maximum}
+   ;; memwidth: end
    ;; The lock pair carries the load's fields: three sources in, one value
    ;; out. No `:mir/stored` -- the stored word is fixed by the operation, not
    ;; supplied by the guest.
@@ -209,6 +238,43 @@
    :mir/capability-call #{:mir/op :mir/dst :mir/capability :mir/kind
                           :mir/context-offset :mir/arguments}
    :mir/return #{:mir/op :mir/value}})
+
+
+;; memwidth: the checked-memory families, as data rather than as a set spelled
+;; out at each of the five places that used to name their members by hand.
+;;
+;; `kernel-window-operations` are BYTE-indexed accesses into a declared window
+;; capped by `:mir/maximum`. `slice-operations` are ELEMENT-indexed accesses
+;; into a host-supplied region whose ceiling is the address space (amu ADR
+;; 0285); the backend scales `:mir/index` by the access width in the addressing
+;; mode instead of adding it as a byte offset.
+
+(def kernel-window-operations
+  #{:mir/kernel-load-u8 :mir/kernel-store-u8
+    :mir/kernel-load-u16 :mir/kernel-store-u16
+    :mir/kernel-load-u32 :mir/kernel-store-u32
+    :mir/kernel-load-u64 :mir/kernel-store-u64})
+
+(def kernel-window-maxima #{512 4096 16384 65536})
+
+(def slice-operations
+  #{:mir/slice-load-u8 :mir/slice-store-u8
+    :mir/slice-load-u16 :mir/slice-store-u16
+    :mir/slice-load-u32 :mir/slice-store-u32
+    :mir/slice-load-u64 :mir/slice-store-u64})
+
+(def slice-item-limit
+  "2^40 elements -- an address-space bound, not a window profile, and
+  deliberately not derived from any vector arena bound. Mirrors
+  `kotoba.gmir/slice-item-limit`; `kotoba.mir-test` asserts the two equal
+  rather than trusting the transcription."
+  1099511627776)
+
+(def ^:private indexed-memory-operations
+  "Every operation that carries a `:mir/index` operand."
+  (into #{:mir/kernel-try-lock-u32 :mir/kernel-unlock-u32}
+        (concat kernel-window-operations slice-operations)))
+;; memwidth: end
 
 (def ^:private v1-operations
   (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call
@@ -297,19 +363,19 @@
                             (:mir/parameters instruction)))]
           (when-not (register? register)
             (reject! :register-profile-violation instruction)))
-        (when (and (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
-                                :mir/kernel-load-u32 :mir/kernel-store-u32
-                                :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32} op)
+        ;; memwidth: one table for every windowed access instead of a clause
+        ;; per width. The clause per width is how `kernel-store-u8` came to be
+        ;; the only member of the family that could not name a 16 KiB window.
+        (when (and (contains? indexed-memory-operations op)
                    (not (register? (:mir/index instruction))))
           (reject! :register-profile-violation instruction))
-        (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8} op)
-          (when-not (and (contains? #{512 4096 16384} (:mir/maximum instruction))
-                         (not (and (= :mir/kernel-store-u8 op)
-                                   (= 16384 (:mir/maximum instruction)))))
+        (when (contains? kernel-window-operations op)
+          (when-not (contains? kernel-window-maxima (:mir/maximum instruction))
             (reject! :invalid-kernel-memory-maximum instruction)))
-        (when (contains? #{:mir/kernel-load-u32 :mir/kernel-store-u32} op)
-          (when-not (= 512 (:mir/maximum instruction))
+        (when (contains? slice-operations op)
+          (when-not (= slice-item-limit (:mir/maximum instruction))
             (reject! :invalid-kernel-memory-maximum instruction)))
+        ;; memwidth: end
         (when (contains? #{:mir/kernel-try-lock-u32 :mir/kernel-unlock-u32} op)
           (when-not (= 4096 (:mir/maximum instruction))
             (reject! :invalid-kernel-memory-maximum instruction)))
@@ -587,7 +653,11 @@
                         (empty? reentries))
               (reject! :invalid-direct-reentry-contract function))))
         (when (and (= :physical registers) (= :all-vregs frame-policy))
-          (let [value-ops #{:mir/argument :mir/constant :mir/add :mir/subtract
+          (let [value-ops (into
+                           ;; memwidth: the two families join by being
+                           ;; families, not by six more hand-written entries.
+                           (into kernel-window-operations slice-operations)
+                           #{:mir/argument :mir/constant :mir/add :mir/subtract
                             :mir/multiply :mir/quotient :mir/quotient-constant
                             :mir/bit-and :mir/bit-or
                             :mir/bit-xor :mir/shift-left :mir/shift-right-signed
@@ -605,7 +675,7 @@
                             :mir/greater-than :mir/less-or-equal
                             :mir/greater-or-equal :mir/call :mir/runtime-call
                             :mir/capability-call :mir/x86-privileged
-                            :mir/data-address}]
+                            :mir/data-address})]
             (doseq [[index instruction] (map-indexed vector instructions)
                     :when (contains? value-ops (:mir/op instruction))]
               (let [store (get instructions (inc index))]
@@ -694,10 +764,8 @@
                              :mir/stored :mir/offset :mir/size])
           (when (vector? (:mir/incomings instruction))
             (map :mir/value (:mir/incomings instruction)))
-          (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
-                             :mir/kernel-load-u32 :mir/kernel-store-u32
-                             :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32}
-                           (:mir/op instruction))
+          ;; memwidth: every operation that carries a `:mir/index` operand.
+          (when (contains? indexed-memory-operations (:mir/op instruction))
             [(:mir/index instruction)])
           (when (vector? (:mir/arguments instruction))
             (:mir/arguments instruction))))
@@ -2321,7 +2389,12 @@
                {:mir/op op :mir/dst r0 :mir/input r0}
                (store-value instruction dst r0)]
 
-              (:mir/kernel-load-u8 :mir/kernel-load-u32
+              ;; memwidth: u16/u64 and the whole slice family select exactly
+              ;; the way u8/u32 already did -- three sources in, one value out.
+              (:mir/kernel-load-u8 :mir/kernel-load-u16
+               :mir/kernel-load-u32 :mir/kernel-load-u64
+               :mir/slice-load-u8 :mir/slice-load-u16
+               :mir/slice-load-u32 :mir/slice-load-u64
                :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32)
               [(load-value instruction base r0)
                (load-value instruction length r1)
@@ -2330,7 +2403,10 @@
                 :mir/index r2 :mir/maximum maximum}
                (store-value instruction dst r0)]
 
-              (:mir/kernel-store-u8 :mir/kernel-store-u32)
+              (:mir/kernel-store-u8 :mir/kernel-store-u16
+               :mir/kernel-store-u32 :mir/kernel-store-u64
+               :mir/slice-store-u8 :mir/slice-store-u16
+               :mir/slice-store-u32 :mir/slice-store-u64)
               [(load-value instruction base r0)
                (load-value instruction length r1)
                (load-value instruction index r2)
