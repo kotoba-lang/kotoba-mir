@@ -1,4 +1,4 @@
-# ADR 0018: the fused family borrows the same tier, and is refused for the same reason
+# ADR 0033: the fused family borrows the same tier, and is refused for the same reason
 
 Status: accepted. Date: 2026-09-02.
 
@@ -10,7 +10,7 @@ BIT FOR BIT, which is a claim about one accumulation tree rather than about a
 dot product. An AArch64 spelling would have to decide whether to keep that tree
 at whatever NEON costs, or answer a different number.
 
-kotoba-gmir ADR 0013 adds three operations of exactly that shape.
+kotoba-gmir ADR 0023 adds three operations of exactly that shape.
 
 ## Decision
 
