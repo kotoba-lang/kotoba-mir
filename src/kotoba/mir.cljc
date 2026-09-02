@@ -307,6 +307,21 @@
    :mir/kernel-dequant-dot-q6-k #{:mir/op :mir/dst :mir/base :mir/length
                                   :mir/second-base :mir/second-length
                                   :mir/count :mir/maximum}
+   ;; dequant-iq: the four codebook formats (kotoba-gmir ADR 0027). Same
+   ;; keyset again: their codebook is read-only data the compiler places,
+   ;; not a region a caller passes, so no operand of theirs is new.
+   :mir/kernel-dequant-dot-iq4-xs #{:mir/op :mir/dst :mir/base :mir/length
+                                  :mir/second-base :mir/second-length
+                                  :mir/count :mir/maximum}
+   :mir/kernel-dequant-dot-iq2-s #{:mir/op :mir/dst :mir/base :mir/length
+                                 :mir/second-base :mir/second-length
+                                 :mir/count :mir/maximum}
+   :mir/kernel-dequant-dot-iq3-xxs #{:mir/op :mir/dst :mir/base :mir/length
+                                   :mir/second-base :mir/second-length
+                                   :mir/count :mir/maximum}
+   :mir/kernel-dequant-dot-iq3-s #{:mir/op :mir/dst :mir/base :mir/length
+                                 :mir/second-base :mir/second-length
+                                 :mir/count :mir/maximum}
    ;; dequant: end
    :mir/kernel-subregion #{:mir/op :mir/dst :mir/base :mir/length
                            :mir/offset :mir/size}
@@ -845,6 +860,10 @@
                             :mir/kernel-dequant-dot-q8-0
                             :mir/kernel-dequant-dot-q4-k
                             :mir/kernel-dequant-dot-q6-k
+                            :mir/kernel-dequant-dot-iq4-xs
+                            :mir/kernel-dequant-dot-iq2-s
+                            :mir/kernel-dequant-dot-iq3-xxs
+                            :mir/kernel-dequant-dot-iq3-s
                             :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
                             :mir/greater-or-equal :mir/call :mir/runtime-call
