@@ -3286,3 +3286,144 @@
            :mir/content "5B1B31A1-9562-11D2-8E3F-00A0C96972" ; two digits short
            :mir/rodata-encoding :guid-mixed-endian}
           {:mir/op :mir/return :mir/value v0}]}))))
+
+;; --- the cycle-breaking temporary is a slot, and a slot has one owner -------
+;; A parallel copy that contains a register cycle breaks it through one frame
+;; slot. That slot has to be one nothing else owns. `entry-argument-plan`
+;; proposes `:temp-slot` before the body has spilled anything, so on a function
+;; whose arguments all fit in registers at entry the proposal is slot 0 -- and
+;; slot 0 is what the first body spill is then handed.
+;;
+;; Measured 2026-09-02 on `os/aiueos/kotoba/hkdf-sha256.kotoba`: its `hmac-mode`
+;; stored the literal 92 into the slot holding `ctx` and passed 92 to the next
+;; four calls as the context pointer (aiueos ADR-0136).
+
+(def ^:private one-pointer-six-calls-module
+  "Transcribed from what `amu` builds for the shape `hmac-mode` has in
+  `os/aiueos/kotoba/hkdf-sha256.kotoba`: one pointer argument live across six
+  four-argument calls, each call materialising its own literals.
+
+  Written from the compiler's own GMIR rather than from a guess about it -- an
+  earlier hand-written version shared one zero constant between the call sites
+  and did not reproduce, because sharing it changes the pressure."
+  (let [v #(gmir/vreg %)]
+    {:gmir/version 3
+     :gmir/entry 'caller
+     :gmir/functions
+     [{:gmir/name 'sink
+       :gmir/arity 4
+       :gmir/instructions
+       [{:gmir/op :gmir/argument :gmir/dst (v 0) :gmir/index 0}
+        {:gmir/op :gmir/argument :gmir/dst (v 1) :gmir/index 1}
+        {:gmir/op :gmir/argument :gmir/dst (v 2) :gmir/index 2}
+        {:gmir/op :gmir/argument :gmir/dst (v 3) :gmir/index 3}
+        {:gmir/op :gmir/add :gmir/dst (v 4) :gmir/left (v 2) :gmir/right (v 3)}
+        {:gmir/op :gmir/add :gmir/dst (v 5) :gmir/left (v 1) :gmir/right (v 4)}
+        {:gmir/op :gmir/add :gmir/dst (v 6) :gmir/left (v 0) :gmir/right (v 5)}
+        {:gmir/op :gmir/return :gmir/value (v 6)}]}
+      {:gmir/name 'caller
+       :gmir/arity 3
+       :gmir/instructions
+       [{:gmir/op :gmir/argument :gmir/dst (v 0) :gmir/index 0}
+        {:gmir/op :gmir/argument :gmir/dst (v 1) :gmir/index 1}
+        {:gmir/op :gmir/argument :gmir/dst (v 2) :gmir/index 2}
+        {:gmir/op :gmir/constant :gmir/dst (v 3) :gmir/value 54}
+        {:gmir/op :gmir/constant :gmir/dst (v 4) :gmir/value 0}
+        {:gmir/op :gmir/call :gmir/dst (v 5) :gmir/callee 'sink
+         :gmir/arguments [(v 0) (v 1) (v 3) (v 4)]}
+        {:gmir/op :gmir/constant :gmir/dst (v 6) :gmir/value 128}
+        {:gmir/op :gmir/constant :gmir/dst (v 7) :gmir/value 0}
+        {:gmir/op :gmir/call :gmir/dst (v 8) :gmir/callee 'sink
+         :gmir/arguments [(v 0) (v 6) (v 2) (v 7)]}
+        {:gmir/op :gmir/constant :gmir/dst (v 9) :gmir/value 64}
+        {:gmir/op :gmir/add :gmir/dst (v 10) :gmir/left (v 9) :gmir/right (v 2)}
+        {:gmir/op :gmir/constant :gmir/dst (v 11) :gmir/value 384}
+        {:gmir/op :gmir/constant :gmir/dst (v 12) :gmir/value 0}
+        {:gmir/op :gmir/call :gmir/dst (v 13) :gmir/callee 'sink
+         :gmir/arguments [(v 0) (v 10) (v 11) (v 12)]}
+        {:gmir/op :gmir/constant :gmir/dst (v 14) :gmir/value 92}
+        {:gmir/op :gmir/constant :gmir/dst (v 15) :gmir/value 0}
+        {:gmir/op :gmir/call :gmir/dst (v 16) :gmir/callee 'sink
+         :gmir/arguments [(v 0) (v 1) (v 14) (v 15)]}
+        {:gmir/op :gmir/constant :gmir/dst (v 17) :gmir/value 384}
+        {:gmir/op :gmir/constant :gmir/dst (v 18) :gmir/value 32}
+        {:gmir/op :gmir/constant :gmir/dst (v 19) :gmir/value 0}
+        {:gmir/op :gmir/call :gmir/dst (v 20) :gmir/callee 'sink
+         :gmir/arguments [(v 0) (v 17) (v 18) (v 19)]}
+        {:gmir/op :gmir/constant :gmir/dst (v 21) :gmir/value 96}
+        {:gmir/op :gmir/constant :gmir/dst (v 22) :gmir/value 64}
+        {:gmir/op :gmir/constant :gmir/dst (v 23) :gmir/value 0}
+        {:gmir/op :gmir/call :gmir/dst (v 24) :gmir/callee 'sink
+         :gmir/arguments [(v 0) (v 21) (v 22) (v 23)]}
+        {:gmir/op :gmir/constant :gmir/dst (v 25) :gmir/value 1}
+        {:gmir/op :gmir/constant :gmir/dst (v 26) :gmir/value 0}
+        {:gmir/op :gmir/add :gmir/dst (v 27) :gmir/left (v 20) :gmir/right (v 24)}
+        {:gmir/op :gmir/add :gmir/dst (v 28) :gmir/left (v 16) :gmir/right (v 27)}
+        {:gmir/op :gmir/add :gmir/dst (v 29) :gmir/left (v 13) :gmir/right (v 28)}
+        {:gmir/op :gmir/add :gmir/dst (v 30) :gmir/left (v 8) :gmir/right (v 29)}
+        {:gmir/op :gmir/add :gmir/dst (v 31) :gmir/left (v 5) :gmir/right (v 30)}
+        {:gmir/op :gmir/multiply :gmir/dst (v 32) :gmir/left (v 26) :gmir/right (v 31)}
+        {:gmir/op :gmir/add :gmir/dst (v 33) :gmir/left (v 25) :gmir/right (v 32)}
+        {:gmir/op :gmir/return :gmir/value (v 33)}]}]}))
+
+(defn- call-clobbered-registers
+  "Every register a call may overwrite: the two caller-saved tiers, the
+  argument registers and the return register, minus the preserved tier."
+  [target]
+  (into #{}
+        (remove (set (get mir/preserved-registers target)))
+        (concat (get mir/physical-registers target)
+                (get mir/leaf-registers target)
+                (get mir/call-argument-registers target)
+                [(get @#'kotoba.mir/return-registers target)])))
+
+(defn- first-argument-at-each-call
+  "Interpret a PHYSICAL stream over ONE tracked value and report what argument
+  register 0 held at each call.
+
+  Only three operations carry a value unchanged -- a move, a spill store and a
+  spill load -- so tracking those is enough to say whether a call receives the
+  value the virtual program named. Anything else that writes a register writes
+  something else, which is what this exists to notice."
+  [target instructions tracked-index]
+  (let [clobbered (call-clobbered-registers target)
+        arg0 (first (get mir/call-argument-registers target))]
+    (:seen
+     (reduce
+      (fn [state {:mir/keys [op dst src slot index]}]
+        (let [registers (:registers state)]
+          (case op
+            :mir/argument (assoc-in state [:registers dst]
+                                    (if (= tracked-index index) ::tracked ::other))
+            :mir/move (assoc-in state [:registers dst] (get registers src ::other))
+            :mir/spill-store (assoc-in state [:slots slot]
+                                       (get registers src ::other))
+            :mir/spill-load (assoc-in state [:registers dst]
+                                      (get (:slots state) slot ::other))
+            (cond
+              (contains? #{:mir/call :mir/tail-call :mir/recur} op)
+              (-> state
+                  (update :seen conj (get registers arg0 ::other))
+                  (assoc :registers (reduce dissoc registers clobbered)))
+              (some? dst) (assoc-in state [:registers dst] ::other)
+              :else state))))
+      {:registers {} :slots {} :seen []}
+      instructions))))
+
+(deftest the-parallel-copy-temporary-never-lands-on-a-live-slot
+  (doseq [target mir/targets]
+    (let [allocated (->> one-pointer-six-calls-module
+                         (mir/select-target target)
+                         mir/allocate-registers)
+          caller (first (filter #(= 'caller (:mir/name %))
+                                (:mir/functions allocated)))
+          instructions (:mir/instructions caller)
+          seen (first-argument-at-each-call target instructions 0)]
+      ;; Evidence floor: a run that does not reach six calls has not measured
+      ;; the six-call shape, and its silence is not a pass.
+      (is (= 6 (count seen))
+          (str target ": the fixture makes six calls; a run that sees fewer "
+               "is not measuring the six-call shape"))
+      (is (every? #(= ::tracked %) seen)
+          (str target ": every call takes the same pointer as argument 0, so "
+               "every call must receive it -- got " (pr-str seen))))))

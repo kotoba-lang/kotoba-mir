@@ -2189,7 +2189,17 @@
                    direct-reentry? (conj {:mir/op :mir/reentry
                                           :mir/parameters parameter-homes}))
              used-temp? (:used-temp? entry)
-             temp-slot (:temp-slot entry)
+             ;; A RESERVATION, not a proposal. `entry-argument-plan` names one
+             ;; past its own spills, which is only reserved when the entry
+             ;; parallel copy actually used it -- `next-slot` was stepped past
+             ;; it then. Carried forward unused, it is the slot the body's
+             ;; first `spill-assigned` is handed, and the next cycle-breaking
+             ;; store lands on a live value. Left nil, `emit-call` derives the
+             ;; temporary from the CURRENT `next-slot` and pins it on first
+             ;; use, which is what the rest of this loop already assumes.
+             ;; Measured 2026-09-02: `hkdf-sha256.kotoba` read its own `ctx`
+             ;; back as the literal 92 (aiueos ADR-0136).
+             temp-slot (when (:used-temp? entry) (:temp-slot entry))
              ;; Everything the entry plan assigned is in place by the end of its
              ;; own instructions, so that is where a store of one of them goes.
              def-position (zipmap (keys (:assigned entry))
