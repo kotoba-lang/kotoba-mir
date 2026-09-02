@@ -181,6 +181,26 @@
                               :mir/index :mir/maximum}
    :mir/kernel-unlock-u32 #{:mir/op :mir/dst :mir/base :mir/length
                             :mir/index :mir/maximum}
+   ;; sysops: the general atomic family (kotoba-gmir ADR 0007). The lock pair
+   ;; fixes its comparand and replacement; these take the word from the guest,
+   ;; which is what a device descriptor ring needs. `:mir/stored` is the
+   ;; addend for the adds and the replacement for the swaps and the
+   ;; compare-exchanges; `:mir/expected` exists only on the two
+   ;; compare-exchanges and is the comparand the lock withholds. `:mir/dst` is
+   ;; the word memory held BEFORE the operation, for all six.
+   :mir/kernel-atomic-add-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                                :mir/index :mir/stored :mir/maximum}
+   :mir/kernel-atomic-add-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                                :mir/index :mir/stored :mir/maximum}
+   :mir/kernel-xchg-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                          :mir/index :mir/stored :mir/maximum}
+   :mir/kernel-xchg-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                          :mir/index :mir/stored :mir/maximum}
+   :mir/kernel-cmpxchg-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/expected :mir/stored :mir/maximum}
+   :mir/kernel-cmpxchg-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/expected :mir/stored :mir/maximum}
+   ;; sysops: end
    :mir/kernel-subregion #{:mir/op :mir/dst :mir/base :mir/length
                            :mir/offset :mir/size}
    :mir/equal #{:mir/op :mir/dst :mir/left :mir/right}
@@ -209,6 +229,13 @@
    :mir/capability-call #{:mir/op :mir/dst :mir/capability :mir/kind
                           :mir/context-offset :mir/arguments}
    :mir/return #{:mir/op :mir/value}})
+
+;; sysops: the MIR names of the general atomic family, derived from GMIR's own
+;; set so the two cannot drift. `kotoba.mir` renames `:gmir/x` to `:mir/x`
+;; wholesale, so deriving is exact rather than a transcription.
+(def kernel-atomic-ops
+  (into #{} (map #(keyword "mir" (name %))) gmir/kernel-atomic-ops))
+;; sysops: end
 
 (def ^:private v1-operations
   (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call
@@ -297,9 +324,13 @@
                             (:mir/parameters instruction)))]
           (when-not (register? register)
             (reject! :register-profile-violation instruction)))
-        (when (and (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
-                                :mir/kernel-load-u32 :mir/kernel-store-u32
-                                :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32} op)
+        (when (and (contains? (into #{:mir/kernel-load-u8 :mir/kernel-store-u8
+                                      :mir/kernel-load-u32 :mir/kernel-store-u32
+                                      :mir/kernel-try-lock-u32
+                                      :mir/kernel-unlock-u32}
+                                    ;; sysops: the atomics index the same way.
+                                    kernel-atomic-ops)
+                              op)
                    (not (register? (:mir/index instruction))))
           (reject! :register-profile-violation instruction))
         (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8} op)
@@ -313,6 +344,12 @@
         (when (contains? #{:mir/kernel-try-lock-u32 :mir/kernel-unlock-u32} op)
           (when-not (= 4096 (:mir/maximum instruction))
             (reject! :invalid-kernel-memory-maximum instruction)))
+        ;; sysops: one spelling each, naming a page -- pinned as a single value
+        ;; rather than a set, exactly as the lock pair's is.
+        (when (contains? kernel-atomic-ops op)
+          (when-not (= 4096 (:mir/maximum instruction))
+            (reject! :invalid-kernel-memory-maximum instruction)))
+        ;; sysops: end
         (when (and (= op :mir/return) (not (register? (:mir/value instruction))))
           (reject! :register-profile-violation instruction))
         (when (= op :mir/phi)
@@ -605,7 +642,10 @@
                             :mir/greater-than :mir/less-or-equal
                             :mir/greater-or-equal :mir/call :mir/runtime-call
                             :mir/capability-call :mir/x86-privileged
-                            :mir/data-address}]
+                            ;; sysops: every atomic produces a value too.
+                            :mir/data-address}
+                    ;; sysops: end
+                  value-ops (into value-ops kernel-atomic-ops)]
             (doseq [[index instruction] (map-indexed vector instructions)
                     :when (contains? value-ops (:mir/op instruction))]
               (let [store (get instructions (inc index))]
@@ -667,6 +707,8 @@
               :gmir/base :mir/base
               :gmir/length :mir/length
               :gmir/stored :mir/stored
+              ;; sysops: the compare-exchange comparand.
+              :gmir/expected :mir/expected
               :gmir/offset :mir/offset
               :gmir/size :mir/size
               :gmir/maximum :mir/maximum)
@@ -691,12 +733,20 @@
 (defn- instruction-sources [instruction]
   (concat (keep instruction [:mir/src :mir/input :mir/left :mir/right :mir/addend
                              :mir/test :mir/value :mir/base :mir/length
+                             ;; sysops: the compare-exchange comparand is read
+                             ;; like any other source. Omitting it here would
+                             ;; leave the allocator free to reuse the register
+                             ;; holding it.
+                             :mir/expected
                              :mir/stored :mir/offset :mir/size])
           (when (vector? (:mir/incomings instruction))
             (map :mir/value (:mir/incomings instruction)))
-          (when (contains? #{:mir/kernel-load-u8 :mir/kernel-store-u8
-                             :mir/kernel-load-u32 :mir/kernel-store-u32
-                             :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32}
+          (when (contains? (into #{:mir/kernel-load-u8 :mir/kernel-store-u8
+                                   :mir/kernel-load-u32 :mir/kernel-store-u32
+                                   :mir/kernel-try-lock-u32
+                                   :mir/kernel-unlock-u32}
+                                 ;; sysops: same index source.
+                                 kernel-atomic-ops)
                            (:mir/op instruction))
             [(:mir/index instruction)])
           (when (vector? (:mir/arguments instruction))
@@ -2338,6 +2388,45 @@
                {:mir/op op :mir/dst r3 :mir/base r0 :mir/length r1
                 :mir/index r2 :mir/stored r3 :mir/maximum maximum}
                (store-value instruction dst r3)]
+
+              ;; sysops: the add and swap forms take the store's four operands
+              ;; and produce a fifth value, so they fit the scratch tier the
+              ;; same way -- `dst` aliases `base`, which the encoder's bounds
+              ;; check has already consumed by the time the result is written.
+              (:mir/kernel-atomic-add-u32 :mir/kernel-atomic-add-u64
+               :mir/kernel-xchg-u32 :mir/kernel-xchg-u64)
+              [(load-value instruction base r0)
+               (load-value instruction length r1)
+               (load-value instruction index r2)
+               (load-value instruction stored r3)
+               {:mir/op op :mir/dst r0 :mir/base r0 :mir/length r1
+                :mir/index r2 :mir/stored r3 :mir/maximum maximum}
+               (store-value instruction dst r0)]
+
+              ;; The compare-exchanges need FIVE registers live at once, one
+              ;; more than the scratch tier holds. They borrow the call
+              ;; argument tier, which `physical-register?` already admits and
+              ;; which this same function already hands to a five-argument
+              ;; call. Nothing lives across the instruction: every operand is
+              ;; loaded from its slot immediately before and dead immediately
+              ;; after, so borrowing the tier cannot collide with a call's own
+              ;; use of it.
+              ;;
+              ;; On x86-64 that tier is rdi/rsi/rdx/rcx/r8 and deliberately
+              ;; excludes RAX, which `lock cmpxchg` fixes as its comparand
+              ;; register and which the encoder saves and restores anyway.
+              (:mir/kernel-cmpxchg-u32 :mir/kernel-cmpxchg-u64)
+              (let [[c0 c1 c2 c3 c4] (get call-argument-registers target)]
+                [(load-value instruction base c0)
+                 (load-value instruction length c1)
+                 (load-value instruction index c2)
+                 (load-value instruction (:mir/expected instruction) c3)
+                 (load-value instruction stored c4)
+                 {:mir/op op :mir/dst c0 :mir/base c0 :mir/length c1
+                  :mir/index c2 :mir/expected c3 :mir/stored c4
+                  :mir/maximum maximum}
+                 (store-value instruction dst c0)])
+              ;; sysops: end
 
               :mir/kernel-subregion
               [(load-value instruction base r0)
