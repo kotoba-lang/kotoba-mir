@@ -3052,3 +3052,120 @@
                (set (instruction-sources
                      {:mir/op op :mir/dst v5 :mir/base v0 :mir/length v1
                       :mir/index v2 :mir/stored v3 :mir/maximum 4096}))))))))
+
+;; ---------------------------------------------------------------------------
+;; simd: the f32 dot product (kotoba-gmir ADR 0010).
+;; ---------------------------------------------------------------------------
+
+(def ^:private simd-dot-instruction
+  {:gmir/op :gmir/kernel-dot-f32 :gmir/dst v5
+   :gmir/base v0 :gmir/length v1
+   :gmir/second-base v2 :gmir/second-length v3
+   :gmir/count v4
+   :gmir/maximum gmir/kernel-dot-f32-maximum})
+
+(def ^:private simd-five-arguments
+  [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+   {:gmir/op :gmir/argument :gmir/dst v1 :gmir/index 1}
+   {:gmir/op :gmir/argument :gmir/dst v2 :gmir/index 2}
+   {:gmir/op :gmir/argument :gmir/dst v3 :gmir/index 3}
+   {:gmir/op :gmir/argument :gmir/dst v4 :gmir/index 4}])
+
+(def ^:private simd-dot-program
+  {:gmir/version 1
+   :gmir/instructions (conj simd-five-arguments simd-dot-instruction
+                            {:gmir/op :gmir/return :gmir/value v5})})
+
+(deftest simd-dot-selects-and-allocates-on-x86-64
+  (let [selected (mir/select-target :x86-64 simd-dot-program)
+        allocated (mir/allocate-registers selected)]
+    (is (= :mir/kernel-dot-f32 (get-in selected [:mir/instructions 5 :mir/op])))
+    (testing "every GMIR field arrives under its MIR name"
+      (is (= #{:mir/op :mir/dst :mir/base :mir/length :mir/second-base
+               :mir/second-length :mir/count :mir/maximum}
+             (set (keys (get-in selected [:mir/instructions 5]))))))
+    (is (some #(= :mir/kernel-dot-f32 (:mir/op %)) (:mir/instructions allocated)))
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
+
+(deftest simd-dot-is-x86-only
+  ;; Not for the privileged channel's reason. It selects AVX2 and legacy SSE,
+  ;; chosen at run time by a cpuid/xgetbv guard; AArch64 would answer with
+  ;; NEON and a different reduction order, and the ORDER is the contract --
+  ;; both arms of the x86 sequence are required to be bit-identical.
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                        #"x86-simd-target-mismatch"
+                        (mir/select-target :aarch64 simd-dot-program)))
+  (testing "and it names the operation it refused, not just the target"
+    (is (= [:gmir/kernel-dot-f32]
+           (get-in (ex-data (try (mir/select-target :aarch64 simd-dot-program)
+                                 (catch clojure.lang.ExceptionInfo e e)))
+                   [:instruction :operations])))))
+
+(deftest simd-dot-allocates-under-an-exhausted-scratch-tier
+  ;; Five values live at once against a four-register scratch tier, so this is
+  ;; the case that decides whether the conservative path can place it at all.
+  ;; It borrows the call-argument tier exactly as the compare-exchanges do.
+  (with-scratch-tier-only
+    (let [allocated (mir/allocate-registers
+                     (mir/select-target :x86-64 simd-dot-program))
+          emitted (first (filter #(= :mir/kernel-dot-f32 (:mir/op %))
+                                 (:mir/instructions allocated)))]
+      (is (some? emitted))
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))
+      (testing "every operand is a physical register"
+        (doseq [field [:mir/dst :mir/base :mir/length :mir/second-base
+                       :mir/second-length :mir/count]]
+          (is (keyword? (get emitted field)) field)
+          (is (not (gmir/vreg? (get emitted field))) field)))
+      (testing "the five sources are five distinct registers"
+        (is (= 5 (count (distinct [(:mir/base emitted) (:mir/length emitted)
+                                   (:mir/second-base emitted)
+                                   (:mir/second-length emitted)
+                                   (:mir/count emitted)])))
+            "a reused source register would silently corrupt one operand")))))
+
+(deftest simd-dot-pins-its-ceiling-in-mir-itself
+  ;; MIR re-derives the ceiling rather than trusting GMIR's, and this asserts
+  ;; MIR's own check by handing it a MIR program directly. Going through
+  ;; `select-target` does NOT test it: GMIR validates first and rejects the
+  ;; same instruction, so deleting MIR's check leaves that route green.
+  (doseq [maximum [512 4096 16384 65535]]
+    (testing (str "maximum " maximum)
+      (let [program {:mir/version 1 :mir/target :x86-64
+                     :mir/registers :virtual
+                     :mir/instructions
+                     [{:mir/op :mir/kernel-dot-f32 :mir/dst v5
+                       :mir/base v0 :mir/length v1
+                       :mir/second-base v2 :mir/second-length v3
+                       :mir/count v4 :mir/maximum maximum}]}]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"invalid-kernel-memory-maximum"
+                              (mir/validate! program))))))
+  (testing "and the ceiling is GMIR's own var, not a transcription"
+    (is (= gmir/kernel-dot-f32-maximum mir/kernel-dot-f32-maximum))))
+
+(deftest simd-dot-reads-all-five-of-its-operands
+  ;; `instruction-sources` is what the linear scanner reads to decide when a
+  ;; value dies. A field missing from it is a value the allocator believes is
+  ;; already dead, so it may hand that register to something else while the
+  ;; instruction still needs it -- and an allocation test only EXHIBITS that
+  ;; on a program whose pressure happens to force the reuse, which is why this
+  ;; is asserted on the function directly.
+  (let [instruction-sources @#'kotoba.mir/instruction-sources
+        sources (set (instruction-sources
+                      {:mir/op :mir/kernel-dot-f32 :mir/dst v5
+                       :mir/base v0 :mir/length v1
+                       :mir/second-base v2 :mir/second-length v3
+                       :mir/count v4
+                       :mir/maximum gmir/kernel-dot-f32-maximum}))]
+    (is (= #{v0 v1 v2 v3 v4} sources)
+        "both bases, both lengths and the count are all read")
+    (is (not (contains? sources v5))
+        "the destination is written, not read")))
+
+(deftest simd-dot-is-not-schedulable
+  ;; It reads memory, branches, and clobbers registers the scheduler does not
+  ;; model. Admitting it to local scheduling would let a reordering move a
+  ;; value across a sequence that pushes and pops four general registers.
+  (is (not (contains? @#'kotoba.mir/schedulable-integer-operations
+                      :mir/kernel-dot-f32))))

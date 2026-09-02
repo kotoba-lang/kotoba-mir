@@ -254,6 +254,21 @@
    :mir/kernel-cmpxchg-u64 #{:mir/op :mir/dst :mir/base :mir/length
                              :mir/index :mir/expected :mir/stored :mir/maximum}
    ;; sysops: end
+   ;; simd: one dot product of two f32 regions (kotoba-gmir ADR 0010).
+   ;;
+   ;; The keyset is GMIR's, renamed. Two regions, so two bases and two
+   ;; lengths; `:mir/base`/`:mir/length` stay the FIRST region's names so
+   ;; anything reading `:mir/base` still finds a base. `:mir/count` counts
+   ;; ELEMENTS while the lengths count BYTES, and `:mir/maximum` is the byte
+   ;; ceiling on both, pinned to one value.
+   ;;
+   ;; It is deliberately NOT in `schedulable-integer-operations`: it reads
+   ;; memory, branches, and clobbers registers the scheduler does not model,
+   ;; so it stays a hard barrier like every other memory operation.
+   :mir/kernel-dot-f32 #{:mir/op :mir/dst :mir/base :mir/length
+                         :mir/second-base :mir/second-length
+                         :mir/count :mir/maximum}
+   ;; simd: end
    :mir/kernel-subregion #{:mir/op :mir/dst :mir/base :mir/length
                            :mir/offset :mir/size}
    :mir/equal #{:mir/op :mir/dst :mir/left :mir/right}
@@ -320,6 +335,12 @@
 (def kernel-atomic-ops
   (into #{} (map #(keyword "mir" (name %))) gmir/kernel-atomic-ops))
 ;; sysops: end
+
+;; simd: the f32 dot product's byte ceiling, taken from GMIR's own var rather
+;; than transcribed, so the two cannot drift the way `slice-item-limit` has to
+;; be asserted equal by a test.
+(def kernel-dot-f32-maximum gmir/kernel-dot-f32-maximum)
+;; simd: end
 
 ;; memwidth: every operation that carries a `:mir/index` operand -- the two
 ;; windowed families, the slice family, the lock pair, and (merged from the
@@ -409,6 +430,10 @@
                           (keep instruction [:mir/dst :mir/src :mir/input
                                              :mir/left :mir/right :mir/addend :mir/test
                                              :mir/base :mir/length
+                                             ;; simd: the second region's pair
+                                             ;; and the element count.
+                                             :mir/second-base :mir/second-length
+                                             :mir/count
                                              :mir/stored :mir/offset :mir/size])
                           (when (vector? (:mir/arguments instruction))
                             (:mir/arguments instruction))
@@ -439,6 +464,11 @@
           (when-not (= 4096 (:mir/maximum instruction))
             (reject! :invalid-kernel-memory-maximum instruction)))
         ;; sysops: end
+        ;; simd: one spelling, one ceiling.
+        (when (= :mir/kernel-dot-f32 op)
+          (when-not (= kernel-dot-f32-maximum (:mir/maximum instruction))
+            (reject! :invalid-kernel-memory-maximum instruction)))
+        ;; simd: end
         (when (and (= op :mir/return) (not (register? (:mir/value instruction))))
           (reject! :register-profile-violation instruction))
         (when (= op :mir/phi)
@@ -741,6 +771,8 @@
                             :mir/kernel-load-u32 :mir/kernel-store-u32
                             :mir/kernel-try-lock-u32 :mir/kernel-unlock-u32
                             :mir/kernel-subregion
+                            ;; simd: the dot product produces a value too.
+                            :mir/kernel-dot-f32
                             :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
                             :mir/greater-or-equal :mir/call :mir/runtime-call
@@ -811,6 +843,10 @@
               :gmir/stored :mir/stored
               ;; sysops: the compare-exchange comparand.
               :gmir/expected :mir/expected
+              ;; simd: the dot product's second region and element count.
+              :gmir/second-base :mir/second-base
+              :gmir/second-length :mir/second-length
+              :gmir/count :mir/count
               :gmir/offset :mir/offset
               :gmir/size :mir/size
               :gmir/maximum :mir/maximum)
@@ -840,6 +876,11 @@
                              ;; leave the allocator free to reuse the register
                              ;; holding it.
                              :mir/expected
+                             ;; simd: the dot product reads five values. Every
+                             ;; one has to be here or liveness kills an input
+                             ;; and the allocator reuses the register holding
+                             ;; it.
+                             :mir/second-base :mir/second-length :mir/count
                              :mir/stored :mir/offset :mir/size])
           (when (vector? (:mir/incomings instruction))
             (map :mir/value (:mir/incomings instruction)))
@@ -1178,10 +1219,21 @@
   (let [instructions (if (= 3 (:gmir/version program))
                        (mapcat :gmir/instructions (:gmir/functions program))
                        (:gmir/instructions program))
-        privileged (filter #(= :gmir/x86-privileged (:gmir/op %)) instructions)]
+        privileged (filter #(= :gmir/x86-privileged (:gmir/op %)) instructions)
+        ;; simd: the f32 dot product is x86-only, for a reason that is not the
+        ;; privileged channel's. It selects AVX2 and legacy SSE, chosen at run
+        ;; time by a `cpuid`/`xgetbv` guard. AArch64 would answer the same
+        ;; question with NEON and a different reduction order, which is a
+        ;; different operation rather than a translation of this one -- and the
+        ;; ORDER is the whole contract here, because both arms of the x86
+        ;; sequence are required to be bit-identical.
+        dot-products (filter #(= :gmir/kernel-dot-f32 (:gmir/op %)) instructions)]
     (when (and (not= :x86-64 target) (seq privileged))
       (reject! :x86-privileged-target-mismatch
-               {:target target :actions (mapv :gmir/action privileged)})))
+               {:target target :actions (mapv :gmir/action privileged)}))
+    (when (and (not= :x86-64 target) (seq dot-products))
+      (reject! :x86-simd-target-mismatch
+               {:target target :operations [:gmir/kernel-dot-f32]})))
   (validate!
    (if (= 3 (:gmir/version program))
      {:mir/version 3
@@ -2542,6 +2594,30 @@
                   :mir/maximum maximum}
                  (store-value instruction dst c0)])
               ;; sysops: end
+
+              ;; simd: FIVE registers live at once -- two bases, two lengths
+              ;; and a count -- one more than the scratch tier holds, so it
+              ;; borrows the call-argument tier exactly as the compare-
+              ;; exchanges above do, and for the same reason: nothing lives
+              ;; across the instruction, because every operand is loaded from
+              ;; its slot immediately before and dead immediately after.
+              ;;
+              ;; The encoder pushes and pops everything else it touches
+              ;; (RAX/RCX/RDX around the feature-detection `cpuid` calls, RBX
+              ;; around the whole sequence), so borrowing this tier cannot
+              ;; collide with a call's own use of it.
+              :mir/kernel-dot-f32
+              (let [[c0 c1 c2 c3 c4] (get call-argument-registers target)]
+                [(load-value instruction base c0)
+                 (load-value instruction length c1)
+                 (load-value instruction (:mir/second-base instruction) c2)
+                 (load-value instruction (:mir/second-length instruction) c3)
+                 (load-value instruction (:mir/count instruction) c4)
+                 {:mir/op op :mir/dst c0 :mir/base c0 :mir/length c1
+                  :mir/second-base c2 :mir/second-length c3 :mir/count c4
+                  :mir/maximum maximum}
+                 (store-value instruction dst c0)])
+              ;; simd: end
 
               :mir/kernel-subregion
               [(load-value instruction base r0)
