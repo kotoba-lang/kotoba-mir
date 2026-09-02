@@ -153,6 +153,19 @@
    :mir/shift-left #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/shift-right-signed #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/shift-right-unsigned #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-add #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-subtract #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-multiply #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-divide #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-min #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-max #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-sqrt #{:mir/op :mir/dst :mir/input}
+   :mir/f32-equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-less-than #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-less-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-greater-than #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+   :mir/f32-unordered #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/f64-add #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/f64-subtract #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/f64-multiply #{:mir/op :mir/dst :mir/left :mir/right}
@@ -592,6 +605,11 @@
                             :mir/bit-and :mir/bit-or
                             :mir/bit-xor :mir/shift-left :mir/shift-right-signed
                             :mir/shift-right-unsigned
+                            :mir/f32-add :mir/f32-subtract :mir/f32-multiply
+                            :mir/f32-divide :mir/f32-min :mir/f32-max
+                            :mir/f32-sqrt :mir/f32-equal :mir/f32-less-than
+                            :mir/f32-less-or-equal :mir/f32-greater-than
+                            :mir/f32-greater-or-equal :mir/f32-unordered
                             :mir/f64-add :mir/f64-subtract :mir/f64-multiply
                             :mir/f64-divide :mir/f64-min :mir/f64-max
                             :mir/f64-sqrt :mir/f64-equal :mir/f64-less-than
@@ -2304,6 +2322,11 @@
               (:mir/add :mir/subtract :mir/multiply :mir/quotient
                :mir/bit-and :mir/bit-or :mir/bit-xor
                :mir/shift-left :mir/shift-right-signed :mir/shift-right-unsigned
+               :mir/f32-add :mir/f32-subtract :mir/f32-multiply
+               :mir/f32-divide :mir/f32-min :mir/f32-max
+               :mir/f32-equal :mir/f32-less-than :mir/f32-less-or-equal
+               :mir/f32-greater-than :mir/f32-greater-or-equal
+               :mir/f32-unordered
                :mir/f64-add :mir/f64-subtract :mir/f64-multiply
                :mir/f64-divide :mir/f64-min :mir/f64-max
                :mir/f64-equal :mir/f64-less-than :mir/f64-less-or-equal
@@ -2316,7 +2339,7 @@
                {:mir/op op :mir/dst r0 :mir/left r0 :mir/right r1}
                (store-value instruction dst r0)]
 
-              :mir/f64-sqrt
+              (:mir/f32-sqrt :mir/f64-sqrt)
               [(load-value instruction input r0)
                {:mir/op op :mir/dst r0 :mir/input r0}
                (store-value instruction dst r0)]

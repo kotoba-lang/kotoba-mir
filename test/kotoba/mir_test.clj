@@ -525,6 +525,32 @@
       (is (some #(= :mir/f64-sqrt (:mir/op %)) (:mir/instructions allocated)))
       (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))))))
 
+(deftest selection-and-allocation-cover-the-f32-family
+  (doseq [target mir/targets
+          op [:gmir/f32-add :gmir/f32-subtract :gmir/f32-multiply
+              :gmir/f32-divide :gmir/f32-min :gmir/f32-max
+              :gmir/f32-equal :gmir/f32-less-than :gmir/f32-less-or-equal
+              :gmir/f32-greater-than :gmir/f32-greater-or-equal
+              :gmir/f32-unordered]]
+    (let [input (assoc-in program [:gmir/instructions 2 :gmir/op] op)
+          selected (mir/select-target target input)
+          allocated (mir/allocate-registers selected)]
+      (is (= (keyword "mir" (name op))
+             (get-in selected [:mir/instructions 2 :mir/op])))
+      (is (some #(= (keyword "mir" (name op)) (:mir/op %))
+                (:mir/instructions allocated)))))
+  (doseq [target mir/targets]
+    (let [input (assoc program :gmir/instructions
+                       [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                        {:gmir/op :gmir/f32-sqrt :gmir/dst v1 :gmir/input v0}
+                        {:gmir/op :gmir/return :gmir/value v1}])
+          selected (mir/select-target target input)
+          allocated (mir/allocate-registers selected)]
+      (is (= :mir/f32-sqrt
+             (get-in selected [:mir/instructions 1 :mir/op])))
+      (is (some #(= :mir/f32-sqrt (:mir/op %)) (:mir/instructions allocated)))
+      (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))))))
+
 (deftest f64-allocation-spills-binary-and-unary-values
   (with-scratch-tier-only
     (let [registers (mapv gmir/vreg (range 11))
