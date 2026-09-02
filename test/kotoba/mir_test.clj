@@ -2862,3 +2862,167 @@
       (is (nil? (get (mir/counted-self-recur-plans (program unsafe-helper))
                      'counted))
           why))))
+
+;; ---------------------------------------------------------------------------
+;; sysops: the general atomic read-modify-write family.
+;; ---------------------------------------------------------------------------
+
+(def ^:private sysops-atomic-operations
+  [{:gmir/op :gmir/kernel-atomic-add-u32 :gmir/dst v5
+    :gmir/base v0 :gmir/length v1 :gmir/index v2 :gmir/stored v3
+    :gmir/maximum 4096}
+   {:gmir/op :gmir/kernel-atomic-add-u64 :gmir/dst v5
+    :gmir/base v0 :gmir/length v1 :gmir/index v2 :gmir/stored v3
+    :gmir/maximum 4096}
+   {:gmir/op :gmir/kernel-xchg-u32 :gmir/dst v5
+    :gmir/base v0 :gmir/length v1 :gmir/index v2 :gmir/stored v3
+    :gmir/maximum 4096}
+   {:gmir/op :gmir/kernel-xchg-u64 :gmir/dst v5
+    :gmir/base v0 :gmir/length v1 :gmir/index v2 :gmir/stored v3
+    :gmir/maximum 4096}
+   {:gmir/op :gmir/kernel-cmpxchg-u32 :gmir/dst v5
+    :gmir/base v0 :gmir/length v1 :gmir/index v2 :gmir/expected v3
+    :gmir/stored v4 :gmir/maximum 4096}
+   {:gmir/op :gmir/kernel-cmpxchg-u64 :gmir/dst v5
+    :gmir/base v0 :gmir/length v1 :gmir/index v2 :gmir/expected v3
+    :gmir/stored v4 :gmir/maximum 4096}])
+
+(deftest selection-and-allocation-cover-the-general-atomics
+  (is (= 6 (count sysops-atomic-operations)))
+  (is (= (into #{} (map :gmir/op) sysops-atomic-operations)
+         gmir/kernel-atomic-ops))
+  (let [prefix [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                {:gmir/op :gmir/argument :gmir/dst v1 :gmir/index 1}
+                {:gmir/op :gmir/argument :gmir/dst v2 :gmir/index 2}
+                {:gmir/op :gmir/argument :gmir/dst v3 :gmir/index 3}
+                {:gmir/op :gmir/argument :gmir/dst v4 :gmir/index 4}]]
+    (doseq [target mir/targets, operation sysops-atomic-operations]
+      (testing (str target " " (:gmir/op operation))
+        (let [program {:gmir/version 1
+                       :gmir/instructions
+                       (conj prefix operation
+                             {:gmir/op :gmir/return :gmir/value v5})}
+              selected (mir/select-target target program)
+              allocated (mir/allocate-registers selected)
+              mir-op (keyword "mir" (name (:gmir/op operation)))]
+          (is (= mir-op (get-in selected [:mir/instructions 5 :mir/op])))
+          (is (some #(= mir-op (:mir/op %)) (:mir/instructions allocated)))
+          (is (not-any? gmir/vreg? (tree-seq coll? seq allocated))))))))
+
+(deftest general-atomics-allocate-under-an-exhausted-scratch-tier
+  ;; The conservative all-vreg path. The compare-exchanges need five registers
+  ;; live at once against a four-register scratch tier, so this is the case
+  ;; that decides whether they can be spilled at all.
+  (with-scratch-tier-only
+    (let [prefix [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                  {:gmir/op :gmir/argument :gmir/dst v1 :gmir/index 1}
+                  {:gmir/op :gmir/argument :gmir/dst v2 :gmir/index 2}
+                  {:gmir/op :gmir/argument :gmir/dst v3 :gmir/index 3}
+                  {:gmir/op :gmir/argument :gmir/dst v4 :gmir/index 4}]]
+      (doseq [target mir/targets, operation sysops-atomic-operations]
+        (testing (str target " " (:gmir/op operation))
+          (let [program {:gmir/version 1
+                         :gmir/instructions
+                         (conj prefix operation
+                               {:gmir/op :gmir/return :gmir/value v5})}
+                allocated (mir/allocate-registers
+                           (mir/select-target target program))
+                mir-op (keyword "mir" (name (:gmir/op operation)))
+                emitted (first (filter #(= mir-op (:mir/op %))
+                                       (:mir/instructions allocated)))]
+            (is (some? emitted))
+            (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))
+            (testing "every operand is a physical register"
+              (doseq [field (cond-> [:mir/dst :mir/base :mir/length :mir/index
+                                     :mir/stored]
+                              (contains? #{:mir/kernel-cmpxchg-u32
+                                           :mir/kernel-cmpxchg-u64} mir-op)
+                              (conj :mir/expected))]
+                (is (keyword? (get emitted field)) field)
+                (is (not (gmir/vreg? (get emitted field))) field)))
+            (testing "the compare-exchange keeps five distinct source registers"
+              (when (contains? #{:mir/kernel-cmpxchg-u32 :mir/kernel-cmpxchg-u64}
+                               mir-op)
+                (is (= 5 (count (distinct [(:mir/base emitted)
+                                           (:mir/length emitted)
+                                           (:mir/index emitted)
+                                           (:mir/expected emitted)
+                                           (:mir/stored emitted)])))
+                    "a reused source register would silently corrupt one operand")
+                (when (= :x86-64 target)
+                  (is (not (contains? (set [(:mir/base emitted)
+                                            (:mir/length emitted)
+                                            (:mir/index emitted)
+                                            (:mir/expected emitted)
+                                            (:mir/stored emitted)])
+                                      :x86-64/rax))
+                      "lock cmpxchg fixes RAX as its comparand register"))))))))))
+
+(deftest general-atomics-pin-their-ceiling-at-one-page-in-mir-itself
+  ;; MIR re-derives the ceiling rather than trusting GMIR's, and this asserts
+  ;; MIR's own check by handing it a MIR program directly. Going through
+  ;; `select-target` does NOT test it: GMIR validates first and rejects the
+  ;; same instruction, so deleting MIR's check leaves that route green
+  ;; (measured -- the whole suite stayed at 0 failures).
+  (doseq [operation sysops-atomic-operations
+          maximum [512 4095 16384]]
+    (testing (str (:gmir/op operation) " maximum " maximum)
+      (let [mir-instruction
+            (into {} (map (fn [[k v]]
+                            [(keyword "mir" (name k))
+                             (if (= k :gmir/op) (keyword "mir" (name v)) v)]))
+                  (assoc operation :gmir/maximum maximum))
+            program {:mir/version 1 :mir/target :x86-64
+                     :mir/registers :virtual
+                     :mir/instructions [mir-instruction]}]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"invalid-kernel-memory-maximum"
+                              (mir/validate! program))))))
+  (testing "and GMIR rejects the same shape one layer earlier"
+    (doseq [operation sysops-atomic-operations
+            maximum [512 4095 16384]]
+      (let [program {:gmir/version 1
+                     :gmir/instructions
+                     [{:gmir/op :gmir/argument :gmir/dst v0 :gmir/index 0}
+                      {:gmir/op :gmir/argument :gmir/dst v1 :gmir/index 1}
+                      {:gmir/op :gmir/argument :gmir/dst v2 :gmir/index 2}
+                      {:gmir/op :gmir/argument :gmir/dst v3 :gmir/index 3}
+                      {:gmir/op :gmir/argument :gmir/dst v4 :gmir/index 4}
+                      (assoc operation :gmir/maximum maximum)
+                      {:gmir/op :gmir/return :gmir/value v5}]}]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"invalid-kernel-memory-maximum"
+                              (mir/select-target :x86-64 program)))))))
+
+(deftest the-compare-exchange-comparand-is-a-liveness-source
+  ;; `instruction-sources` is what the linear scanner reads to decide when a
+  ;; value dies. A field missing from it is a value the allocator believes is
+  ;; already dead, so it may hand that register to something else while the
+  ;; instruction still needs it.
+  ;;
+  ;; This is asserted on the function directly rather than through an
+  ;; allocation, because an allocation only EXHIBITS the bug on a program
+  ;; whose pressure happens to force the reuse -- measured: deleting
+  ;; `:mir/expected` from the keep-list left the whole suite green, including
+  ;; a five-operand allocation test, because the conservative path assigns
+  ;; fixed registers and the scanner path had slack.
+  (let [instruction-sources @#'kotoba.mir/instruction-sources]
+    (doseq [op [:mir/kernel-cmpxchg-u32 :mir/kernel-cmpxchg-u64]]
+      (testing (str op)
+        (let [instruction {:mir/op op :mir/dst v5 :mir/base v0 :mir/length v1
+                           :mir/index v2 :mir/expected v3 :mir/stored v4
+                           :mir/maximum 4096}
+              sources (set (instruction-sources instruction))]
+          (is (= #{v0 v1 v2 v3 v4} sources)
+              "base, length, index, comparand and replacement are all read")
+          (is (contains? sources v3)
+              "the comparand is read by the instruction and must be live at it")
+          (is (not (contains? sources v5))
+              "the destination is written, not read"))))
+    (doseq [op [:mir/kernel-atomic-add-u32 :mir/kernel-atomic-add-u64
+                :mir/kernel-xchg-u32 :mir/kernel-xchg-u64]]
+      (testing (str op)
+        (is (= #{v0 v1 v2 v3}
+               (set (instruction-sources
+                     {:mir/op op :mir/dst v5 :mir/base v0 :mir/length v1
+                      :mir/index v2 :mir/stored v3 :mir/maximum 4096}))))))))
