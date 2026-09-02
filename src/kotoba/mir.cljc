@@ -2438,7 +2438,13 @@
                (store-value instruction dst r0)]
 
               :mir/x86-privileged
-              (let [argument-registers (subvec [r0 r1] 0 (count arguments))]
+              ;; boot: the whole scratch tier, not the first two of it. The
+              ;; vector was `[r0 r1]` while no action took more than two
+              ;; arguments, so `:uefi-call2`'s four would have thrown out of
+              ;; `subvec` rather than allocating. The tier is exactly four
+              ;; registers wide on both targets, which is also why
+              ;; `:uefi-call2` takes four operands and not five.
+              (let [argument-registers (subvec [r0 r1 r2 r3] 0 (count arguments))]
                 (concat
                  (mapv (fn [value register]
                          (load-value instruction value register))
