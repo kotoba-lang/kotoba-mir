@@ -31,6 +31,23 @@
    :aarch64 [:aarch64/x19 :aarch64/x20 :aarch64/x21 :aarch64/x22
              :aarch64/x23 :aarch64/x24 :aarch64/x25 :aarch64/x26]})
 
+(defn privileged-argument-registers
+  "boot-lit: the registers the conservative expansion may hand a privileged
+  action's operands, in order. The scratch tier first -- an action narrow
+  enough to stay inside it costs no frame save -- then the preserved tier,
+  which is callee-saved under Microsoft x64 as well as under the internal ABI.
+
+  That second half is what makes `:uefi-call6` possible at all: its eight
+  operands do not fit in four registers, and an operand held in a caller-saved
+  register would not survive the firmware call it is an operand to.
+
+  Derived rather than written out, so it stays as wide as the two tiers are.
+  `x86-privileged-action-arities`'s widest entry has to fit; the suite asserts
+  that it does rather than trusting the arithmetic."
+  [target]
+  (vec (concat (get physical-registers target)
+               (get preserved-registers target))))
+
 (defn allocator-pool
   "The registers an allocation path may hand out. The scratch tier comes first
   so that a function small enough to stay inside it costs no frame save; the
@@ -140,6 +157,10 @@
   {:mir/argument #{:mir/op :mir/dst :mir/index}
    :mir/constant #{:mir/op :mir/dst :mir/value}
    :mir/data-address #{:mir/op :mir/dst :mir/content}
+   ;; boot-lit: the address of a read-only literal placed in the code image
+   ;; (kotoba-gmir ADR-0011). Distinct from `:mir/data-address` above, which
+   ;; is a managed string the value runtime resolves against a runtime base.
+   :mir/rodata-address #{:mir/op :mir/dst :mir/content :mir/rodata-encoding}
    :mir/add #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/subtract #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/multiply #{:mir/op :mir/dst :mir/left :mir/right}
@@ -556,6 +577,15 @@
         (when (and (= op :mir/data-address)
                    (not (string? (:mir/content instruction))))
           (reject! :invalid-data-content instruction))
+        ;; boot-lit: re-derived from `kotoba.gmir` rather than trusted through
+        ;; selection, for the reason every other re-derivation here exists: a
+        ;; literal that arrives malformed at THIS layer still gets a pool
+        ;; entry and an address, and the wrongness only appears as firmware
+        ;; answering a question nobody asked.
+        (when (and (= op :mir/rodata-address)
+                   (not (gmir/rodata-content? (:mir/rodata-encoding instruction)
+                                              (:mir/content instruction))))
+          (reject! :invalid-rodata-content instruction))
         (when (and (= op :mir/argument)
                    (not (and (integer? (:mir/index instruction))
                              (not (neg? (:mir/index instruction))))))
@@ -778,7 +808,9 @@
                             :mir/greater-or-equal :mir/call :mir/runtime-call
                             :mir/capability-call :mir/x86-privileged
                             ;; sysops: every atomic produces a value too.
-                            :mir/data-address})
+                            :mir/data-address
+                            ;; boot-lit: so does a literal's address.
+                            :mir/rodata-address})
                   value-ops (into value-ops kernel-atomic-ops)]
             (doseq [[index instruction] (map-indexed vector instructions)
                     :when (contains? value-ops (:mir/op instruction))]
@@ -832,6 +864,10 @@
               :gmir/target :mir/target
               :gmir/incomings :mir/incomings
               :gmir/content :mir/content
+
+              ;; boot-lit: the literal encoding travels with its content.
+
+              :gmir/rodata-encoding :mir/rodata-encoding
               :gmir/callee :mir/callee
               :gmir/runtime :mir/runtime
               :gmir/action :mir/action
@@ -1227,13 +1263,26 @@
         ;; different operation rather than a translation of this one -- and the
         ;; ORDER is the whole contract here, because both arms of the x86
         ;; sequence are required to be bit-identical.
-        dot-products (filter #(= :gmir/kernel-dot-f32 (:gmir/op %)) instructions)]
+        dot-products (filter #(= :gmir/kernel-dot-f32 (:gmir/op %)) instructions)
+        ;; boot-lit: a literal's address is x86-only today, and that is an
+        ;; admission of a gap rather than a decision about AArch64. The
+        ;; instruction is `lea dst,[rip+disp32]`; AArch64's answer is
+        ;; `adrp`+`add`, whose 4 KiB page split the layout pass does not model
+        ;; yet. Refusing here is the alternative to selecting a `:aarch64/`
+        ;; encoding that does not exist and failing later with
+        ;; `:unknown-encoding`, which reads as a compiler bug rather than as
+        ;; the missing feature it is.
+        literals (filter #(= :gmir/rodata-address (:gmir/op %)) instructions)]
     (when (and (not= :x86-64 target) (seq privileged))
       (reject! :x86-privileged-target-mismatch
                {:target target :actions (mapv :gmir/action privileged)}))
     (when (and (not= :x86-64 target) (seq dot-products))
       (reject! :x86-simd-target-mismatch
-               {:target target :operations [:gmir/kernel-dot-f32]})))
+               {:target target :operations [:gmir/kernel-dot-f32]}))
+    (when (and (not= :x86-64 target) (seq literals))
+      (reject! :rodata-address-target-mismatch
+               {:target target
+                :encodings (mapv :gmir/rodata-encoding literals)})))
   (validate!
    (if (= 3 (:gmir/version program))
      {:mir/version 3
@@ -2485,6 +2534,12 @@
               [(assoc instruction :mir/dst r0)
                (store-value instruction dst r0)]
 
+              ;; boot-lit: a literal's address reads nothing and writes one
+              ;; register, exactly like the managed string address above.
+              :mir/rodata-address
+              [(assoc instruction :mir/dst r0)
+               (store-value instruction dst r0)]
+
               :mir/merge-store
               (let [phi-dst (or (get merge-dst-by-slot (:mir/slot instruction))
                                 (reject! :unknown-merge-slot instruction))]
@@ -2635,7 +2690,20 @@
               ;; `subvec` rather than allocating. The tier is exactly four
               ;; registers wide on both targets, which is also why
               ;; `:uefi-call2` takes four operands and not five.
-              (let [argument-registers (subvec [r0 r1 r2 r3] 0 (count arguments))]
+              ;;
+              ;; boot-lit: and then `:uefi-call6` took eight. The tier did not
+              ;; get wider -- the PRESERVED tier follows it, and every
+              ;; register in that tier is callee-saved under Microsoft x64
+              ;; (RBX, RBP, RDI, RSI, R12-R15) as well as under the internal
+              ;; ABI, so an argument parked there survives the firmware call
+              ;; it is an argument to. The scratch tier comes first so an
+              ;; action narrow enough to stay inside it still costs no frame
+              ;; save; `mir/saved-registers` derives the saves from the
+              ;; emitted stream, so naming a preserved register here is what
+              ;; makes the frame save it.
+              (let [argument-registers
+                    (subvec (privileged-argument-registers target)
+                            0 (count arguments))]
                 (concat
                  (mapv (fn [value register]
                          (load-value instruction value register))
