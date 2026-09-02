@@ -3427,3 +3427,61 @@
       (is (every? #(= ::tracked %) seen)
           (str target ": every call takes the same pointer as argument 0, so "
                "every call must receive it -- got " (pr-str seen))))))
+
+;; --- boot-scratch: a writable region and a function's address --------------
+
+(defn- boot-scratch-module
+  "A v3 module whose entry takes the address of `helper`, which nothing calls."
+  []
+  {:gmir/version 3
+   :gmir/entry 'main
+   :gmir/functions
+   [{:gmir/name 'main :gmir/arity 0
+     :gmir/instructions
+     [{:gmir/op :gmir/function-address :gmir/dst v0 :gmir/function 'helper}
+      {:gmir/op :gmir/return :gmir/value v0}]}
+    {:gmir/name 'helper :gmir/arity 0
+     :gmir/instructions
+     [{:gmir/op :gmir/constant :gmir/dst v0 :gmir/value 7}
+      {:gmir/op :gmir/return :gmir/value v0}]}]})
+
+(deftest boot-scratch-function-address-selection-preserves-the-name
+  (let [allocated (mir/allocate-registers
+                   (mir/select-target :x86-64 (boot-scratch-module)))
+        instruction (first (get-in allocated [:mir/functions 0 :mir/instructions]))]
+    (is (= :mir/function-address (:mir/op instruction)))
+    (is (= 'helper (:mir/function instruction)))
+    (is (= "x86-64" (namespace (:mir/dst instruction))))))
+
+(deftest boot-scratch-function-address-is-x86-only-under-its-own-keyword
+  ;; Its own keyword rather than the literal's: the two refusals name
+  ;; different operations, and `adrp`+`add` is the missing translation for
+  ;; both, not one refusal covering two.
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"function-address-target-mismatch"
+       (mir/select-target :aarch64 (boot-scratch-module)))))
+
+(deftest boot-scratch-mir-re-derives-the-name-shape
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"invalid-function-address"
+       (mir/validate!
+        {:mir/version 3 :mir/target :x86-64 :mir/registers :virtual
+         :mir/entry 'main
+         :mir/functions
+         [{:mir/name 'main :mir/arity 0
+           :mir/instructions
+           [{:mir/op :mir/function-address :mir/dst v0 :mir/function "helper"}
+            {:mir/op :mir/return :mir/value v0}]}]}))))
+
+(deftest boot-scratch-the-scratch-region-allocates-like-any-zero-arity-action
+  (let [program {:gmir/version 1
+                 :gmir/instructions
+                 [{:gmir/op :gmir/x86-privileged :gmir/dst v0
+                   :gmir/action :scratch-region :gmir/arguments []}
+                  {:gmir/op :gmir/return :gmir/value v0}]}
+        allocated (mir/allocate-registers (mir/select-target :x86-64 program))
+        instruction (first (:mir/instructions allocated))]
+    (is (= :scratch-region (:mir/action instruction)))
+    (is (= [] (:mir/arguments instruction)))
+    (testing "no operands, so no preserved register and no frame save"
+      (is (empty? (mir/saved-registers :x86-64 (:mir/instructions allocated)))))))

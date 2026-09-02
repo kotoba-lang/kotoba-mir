@@ -161,6 +161,10 @@
    ;; (kotoba-gmir ADR-0011). Distinct from `:mir/data-address` above, which
    ;; is a managed string the value runtime resolves against a runtime base.
    :mir/rodata-address #{:mir/op :mir/dst :mir/content :mir/rodata-encoding}
+   ;; boot-scratch: the address of a function in the same module (kotoba-gmir
+   ;; ADR-0013). One destination, no sources, and a NAME -- the same shape as
+   ;; the literal above, with a symbol where that one has a string.
+   :mir/function-address #{:mir/op :mir/dst :mir/function}
    :mir/add #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/subtract #{:mir/op :mir/dst :mir/left :mir/right}
    :mir/multiply #{:mir/op :mir/dst :mir/left :mir/right}
@@ -613,6 +617,13 @@
                    (not (gmir/rodata-content? (:mir/rodata-encoding instruction)
                                               (:mir/content instruction))))
           (reject! :invalid-rodata-content instruction))
+        ;; boot-scratch: re-derived here for the reason above -- selection
+        ;; copies the name through untouched, and a hand-built MIR program
+        ;; that never passed `gmir/validate!` would otherwise reach the
+        ;; backend's label table with something that is not a name.
+        (when (and (= op :mir/function-address)
+                   (not (gmir/function-id? (:mir/function instruction))))
+          (reject! :invalid-function-address instruction))
         (when (and (= op :mir/argument)
                    (not (and (integer? (:mir/index instruction))
                              (not (neg? (:mir/index instruction))))))
@@ -841,7 +852,9 @@
                             ;; sysops: every atomic produces a value too.
                             :mir/data-address
                             ;; boot-lit: so does a literal's address.
-                            :mir/rodata-address})
+                            :mir/rodata-address
+                            ;; boot-scratch: and so does a function's.
+                            :mir/function-address})
                   value-ops (into value-ops kernel-atomic-ops)]
             (doseq [[index instruction] (map-indexed vector instructions)
                     :when (contains? value-ops (:mir/op instruction))]
@@ -899,6 +912,8 @@
               ;; boot-lit: the literal encoding travels with its content.
 
               :gmir/rodata-encoding :mir/rodata-encoding
+              ;; boot-scratch: the named function travels with its address.
+              :gmir/function :mir/function
               :gmir/callee :mir/callee
               :gmir/runtime :mir/runtime
               :gmir/action :mir/action
@@ -1311,7 +1326,13 @@
         ;; encoding that does not exist and failing later with
         ;; `:unknown-encoding`, which reads as a compiler bug rather than as
         ;; the missing feature it is.
-        literals (filter #(= :gmir/rodata-address (:gmir/op %)) instructions)]
+        literals (filter #(= :gmir/rodata-address (:gmir/op %)) instructions)
+        ;; boot-scratch: a function's address is `lea dst,[rip+disp32]` too,
+        ;; so it is x86-only for exactly the reason the literal is, and says
+        ;; so with its own keyword rather than borrowing the literal's -- the
+        ;; two refusals name different operations and a caller reading the
+        ;; report should not have to guess which one it wrote.
+        addresses (filter #(= :gmir/function-address (:gmir/op %)) instructions)]
     (when (and (not= :x86-64 target) (seq privileged))
       (reject! :x86-privileged-target-mismatch
                {:target target :actions (mapv :gmir/action privileged)}))
@@ -1322,7 +1343,11 @@
     (when (and (not= :x86-64 target) (seq literals))
       (reject! :rodata-address-target-mismatch
                {:target target
-                :encodings (mapv :gmir/rodata-encoding literals)})))
+                :encodings (mapv :gmir/rodata-encoding literals)}))
+    (when (and (not= :x86-64 target) (seq addresses))
+      (reject! :function-address-target-mismatch
+               {:target target
+                :functions (mapv :gmir/function addresses)})))
   (validate!
    (if (= 3 (:gmir/version program))
      {:mir/version 3
@@ -2587,6 +2612,13 @@
               ;; boot-lit: a literal's address reads nothing and writes one
               ;; register, exactly like the managed string address above.
               :mir/rodata-address
+              [(assoc instruction :mir/dst r0)
+               (store-value instruction dst r0)]
+
+              ;; boot-scratch: a function's address reads nothing either. The
+              ;; label it resolves against belongs to the module, which this
+              ;; layer never sees; the backend holds the table.
+              :mir/function-address
               [(assoc instruction :mir/dst r0)
                (store-value instruction dst r0)]
 
