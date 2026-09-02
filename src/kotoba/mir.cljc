@@ -290,6 +290,20 @@
                          :mir/second-base :mir/second-length
                          :mir/count :mir/maximum}
    ;; simd: end
+   ;; dequant: the fused dequantize-and-dot family. The f32 dot product's
+   ;; keyset exactly, because the operand SHAPE is the same one -- two
+   ;; regions, a ceiling and a count. What the count counts differs (blocks,
+   ;; not elements) and that is the format's business, not the keyset's.
+   :mir/kernel-dequant-dot-q8-0 #{:mir/op :mir/dst :mir/base :mir/length
+                                  :mir/second-base :mir/second-length
+                                  :mir/count :mir/maximum}
+   :mir/kernel-dequant-dot-q4-k #{:mir/op :mir/dst :mir/base :mir/length
+                                  :mir/second-base :mir/second-length
+                                  :mir/count :mir/maximum}
+   :mir/kernel-dequant-dot-q6-k #{:mir/op :mir/dst :mir/base :mir/length
+                                  :mir/second-base :mir/second-length
+                                  :mir/count :mir/maximum}
+   ;; dequant: end
    :mir/kernel-subregion #{:mir/op :mir/dst :mir/base :mir/length
                            :mir/offset :mir/size}
    :mir/equal #{:mir/op :mir/dst :mir/left :mir/right}
@@ -362,6 +376,14 @@
 ;; be asserted equal by a test.
 (def kernel-dot-f32-maximum gmir/kernel-dot-f32-maximum)
 ;; simd: end
+
+;; dequant: the fused family's operations and ceiling, taken from GMIR's own
+;; vars rather than transcribed.
+(def kernel-dequant-dot-operations
+  (into #{} (map #(keyword "mir" (name %))) gmir/kernel-dequant-dot-operations))
+
+(def kernel-dequant-dot-maximum gmir/kernel-dequant-dot-maximum)
+;; dequant: end
 
 ;; memwidth: every operation that carries a `:mir/index` operand -- the two
 ;; windowed families, the slice family, the lock pair, and (merged from the
@@ -490,6 +512,11 @@
           (when-not (= kernel-dot-f32-maximum (:mir/maximum instruction))
             (reject! :invalid-kernel-memory-maximum instruction)))
         ;; simd: end
+        ;; dequant: one ceiling for the whole family.
+        (when (contains? kernel-dequant-dot-operations op)
+          (when-not (= kernel-dequant-dot-maximum (:mir/maximum instruction))
+            (reject! :invalid-kernel-memory-maximum instruction)))
+        ;; dequant: end
         (when (and (= op :mir/return) (not (register? (:mir/value instruction))))
           (reject! :register-profile-violation instruction))
         (when (= op :mir/phi)
@@ -803,6 +830,10 @@
                             :mir/kernel-subregion
                             ;; simd: the dot product produces a value too.
                             :mir/kernel-dot-f32
+                            ;; dequant: and so does every fused format.
+                            :mir/kernel-dequant-dot-q8-0
+                            :mir/kernel-dequant-dot-q4-k
+                            :mir/kernel-dequant-dot-q6-k
                             :mir/equal :mir/less-than
                             :mir/greater-than :mir/less-or-equal
                             :mir/greater-or-equal :mir/call :mir/runtime-call
@@ -1263,7 +1294,15 @@
         ;; different operation rather than a translation of this one -- and the
         ;; ORDER is the whole contract here, because both arms of the x86
         ;; sequence are required to be bit-identical.
-        dot-products (filter #(= :gmir/kernel-dot-f32 (:gmir/op %)) instructions)
+        ;; dequant: the fused family is x86-only for the same reason and by
+        ;; the same measurement -- its two arms are AVX2 and legacy SSE, and
+        ;; the claim that binds them is that they agree BIT FOR BIT. A NEON
+        ;; arm would be a third answer nothing has compared with the other
+        ;; two.
+        dot-products (filter #(or (= :gmir/kernel-dot-f32 (:gmir/op %))
+                                  (contains? gmir/kernel-dequant-dot-operations
+                                             (:gmir/op %)))
+                             instructions)
         ;; boot-lit: a literal's address is x86-only today, and that is an
         ;; admission of a gap rather than a decision about AArch64. The
         ;; instruction is `lea dst,[rip+disp32]`; AArch64's answer is
@@ -1278,7 +1317,8 @@
                {:target target :actions (mapv :gmir/action privileged)}))
     (when (and (not= :x86-64 target) (seq dot-products))
       (reject! :x86-simd-target-mismatch
-               {:target target :operations [:gmir/kernel-dot-f32]}))
+               {:target target
+                :operations (vec (distinct (map :gmir/op dot-products)))}))
     (when (and (not= :x86-64 target) (seq literals))
       (reject! :rodata-address-target-mismatch
                {:target target
@@ -2671,7 +2711,13 @@
               ;; (RAX/RCX/RDX around the feature-detection `cpuid` calls, RBX
               ;; around the whole sequence), so borrowing this tier cannot
               ;; collide with a call's own use of it.
-              :mir/kernel-dot-f32
+              ;; dequant: the fused family borrows the same tier for the
+              ;; same reason -- five operands, none of them live across the
+              ;; instruction.
+              (:mir/kernel-dot-f32
+               :mir/kernel-dequant-dot-q8-0
+               :mir/kernel-dequant-dot-q4-k
+               :mir/kernel-dequant-dot-q6-k)
               (let [[c0 c1 c2 c3 c4] (get call-argument-registers target)]
                 [(load-value instruction base c0)
                  (load-value instruction length c1)
