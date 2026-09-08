@@ -1224,6 +1224,40 @@
 (defn- schedule-program [{:mir/keys [target] :as program}]
   (update program :mir/instructions #(schedule-instructions target %)))
 
+(defn- host-number
+  "A guest i64 literal narrowed to a host number, for BOUNDED comparisons only.
+
+  MIR carries KIR literals through unchanged, and on ClojureScript a guest i64
+  is a JavaScript BigInt while every number this namespace synthesizes is a
+  plain one. The two do not compare, and they fail SILENTLY in both
+  directions: `(zero? (js/BigInt 0))` and `(integer? (js/BigInt 0))` are both
+  false, so a guard written with either simply stops recognizing its case.
+
+  Measured 2026-09-08 through amu on nbb, `(if (= a 0) a a)` on aarch64: 12
+  bytes when the literal reached here as a host number, 24 when it reached
+  here as a BigInt. `aarch64-fuse-zero-equality-branches` below tests its
+  constant with `zero?`, so the fusion never fired for a literal that came
+  from the READER -- which is every literal written in real source. It fired
+  only for the ones the frontend synthesizes. The JVM emits 12 for the same
+  program, because a Long compares to 0.
+
+  Two consequences, and the second is the one that turns a missed
+  optimization into a correctness problem. The fusion was dead on the
+  JVM-free front. And emission stopped being a function of the KIR VALUE:
+  `kotoba-verifier` re-derives the instruction stream from sealed KIR and
+  rejects any drift, so once `amu extract-native` read artifacts with a
+  reader that preserves i64 exactly, a closure-bearing artifact was refused
+  as \"native instruction stream rejected\" -- correctly, by a verifier with
+  no way to tell representation drift from a tampered artifact.
+
+  Narrowing is safe HERE because every caller compares against a small bound
+  (zero, or membership in `#{-1 0}`), and a literal too large for a double is
+  unequal to those under either representation. Do not carry the result
+  onward: `gmir/i64-value?` is the exact test, and this is not it."
+  [value]
+  #?(:clj value
+     :cljs (if (gmir/i64-value? value) (js/Number value) value)))
+
 (defn- aarch64-fuse-zero-equality-branches
   "Turn one SSA-only `zero; equal; branch-zero` triple into branch-nonzero.
 
@@ -1251,7 +1285,7 @@
                 operand (cond (= zero left) right
                               (= zero right) left)
                 fuse? (and (= :mir/constant (:mir/op constant))
-                           (zero? (:mir/value constant))
+                           (zero? (host-number (:mir/value constant)))
                            (= :mir/equal (:mir/op equal))
                            (= :mir/branch-zero (:mir/op branch))
                            (= result (:mir/test branch))
@@ -3008,9 +3042,12 @@
 
 (defn- bulk-fuel-pure-instruction? [{:mir/keys [op divisor]}]
   (or (contains? bulk-fuel-pure-ops op)
+      ;; Same representation hazard as `host-number`'s docstring records: a
+      ;; divisor that came from the reader is a BigInt, `integer?` is false
+      ;; for one, and this whole clause silently stopped admitting it.
       (and (= :mir/quotient-constant op)
-           (integer? divisor)
-           (not (contains? #{-1 0} divisor)))))
+           (gmir/i64-value? divisor)
+           (not (contains? #{-1 0} (host-number divisor))))))
 
 (defn- bulk-fuel-pure-leaf?
   "Prove a closed direct callee finite, pure and nontrapping.  `leaf` is
