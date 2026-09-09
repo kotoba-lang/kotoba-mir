@@ -3087,19 +3087,64 @@
     (is (some #(= :mir/kernel-dot-f32 (:mir/op %)) (:mir/instructions allocated)))
     (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
 
-(deftest simd-dot-is-x86-only
-  ;; Not for the privileged channel's reason. It selects AVX2 and legacy SSE,
-  ;; chosen at run time by a cpuid/xgetbv guard; AArch64 would answer with
-  ;; NEON and a different reduction order, and the ORDER is the contract --
-  ;; both arms of the x86 sequence are required to be bit-identical.
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                        #"x86-simd-target-mismatch"
-                        (mir/select-target :aarch64 simd-dot-program)))
-  (testing "and it names the operation it refused, not just the target"
-    (is (= [:gmir/kernel-dot-f32]
-           (get-in (ex-data (try (mir/select-target :aarch64 simd-dot-program)
-                                 (catch clojure.lang.ExceptionInfo e e)))
-                   [:instruction :operations])))))
+(deftest simd-dot-selects-on-aarch64-too
+  ;; This deftest used to be `simd-dot-is-x86-only` and asserted the opposite.
+  ;; It was right while it stood: the contract of `kernel-dot-f32` is an
+  ;; ACCUMULATION TREE and not a dot product -- floating-point addition is not
+  ;; associative, so one specific order of summation IS the operation -- and
+  ;; no AArch64 spelling reproduced that order.
+  ;;
+  ;; One does now (2026-09-09). `kotoba.native.machine-ir/a64-kernel-dot-f32`
+  ;; is the x86 sequence's SCALAR arm instruction for instruction, and AArch64
+  ;; scalar FMUL/FADD are IEEE-754 round-to-nearest-even on the operands SSE's
+  ;; mulss/addss are, so the arms agree by construction. It is scalar and not
+  ;; NEON deliberately: the cheap NEON reduction computes a different tree.
+  ;; Measured, not merely argued -- the emitted bytes were assembled and
+  ;; called on an arm64-apple-macos host and answered 0x4B800004 for
+  ;; `dot-f32-probe.kotoba`'s fixture, which is the digit string that names
+  ;; this tree and not a left-to-right sum.
+  ;;
+  ;; So this asserts SELECTION rather than refusal, and the shape it checks is
+  ;; the one the refusal used to make impossible: five operands, all physical,
+  ;; on the AArch64 call-argument tier.
+  (let [selected (mir/select-target :aarch64 simd-dot-program)
+        allocated (mir/allocate-registers selected)
+        emitted (first (filter #(= :mir/kernel-dot-f32 (:mir/op %))
+                               (:mir/instructions allocated)))]
+    (is (= :mir/kernel-dot-f32 (get-in selected [:mir/instructions 5 :mir/op])))
+    (is (some? emitted) "the operation survives allocation on AArch64")
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))
+    (testing "every operand is a physical AArch64 register"
+      (is (every? #(= "aarch64" (namespace %))
+                  ((juxt :mir/dst :mir/base :mir/length :mir/second-base
+                         :mir/second-length :mir/count)
+                   emitted))))))
+
+(deftest fused-dequant-dot-is-still-x86-only
+  ;; The fused family did NOT move with it, and the reason it stays is now
+  ;; NARROWER than the one above: it is no longer the tree, it is that each
+  ;; format's per-block decode -- an fp16 scale, a nibble split, a six-bit
+  ;; regroup -- has no second arm yet. That is a gap and it is named as one.
+  ;;
+  ;; The refusal keyword is unchanged (`:x86-simd-target-mismatch`), which is
+  ;; why this test exists at all: without it, removing `kernel-dot-f32` from
+  ;; the refusal would have left the keyword with no reaching case, and a
+  ;; keyword nothing reaches is indistinguishable from a keyword that no
+  ;; longer works.
+  (let [q8 (assoc simd-dot-instruction
+                  :gmir/op :gmir/kernel-dequant-dot-q8-0
+                  :gmir/maximum gmir/kernel-dequant-dot-maximum)
+        program {:gmir/version 1
+                 :gmir/instructions (conj simd-five-arguments q8
+                                          {:gmir/op :gmir/return :gmir/value v5})}]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"x86-simd-target-mismatch"
+                          (mir/select-target :aarch64 program)))
+    (testing "and it names the operation it refused, not just the target"
+      (is (= [:gmir/kernel-dequant-dot-q8-0]
+             (get-in (ex-data (try (mir/select-target :aarch64 program)
+                                   (catch clojure.lang.ExceptionInfo e e)))
+                     [:instruction :operations]))))))
 
 (deftest simd-dot-allocates-under-an-exhausted-scratch-tier
   ;; Five values live at once against a four-register scratch tier, so this is

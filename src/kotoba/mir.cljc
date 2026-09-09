@@ -1355,21 +1355,24 @@
                        (mapcat :gmir/instructions (:gmir/functions program))
                        (:gmir/instructions program))
         privileged (filter #(= :gmir/x86-privileged (:gmir/op %)) instructions)
-        ;; simd: the f32 dot product is x86-only, for a reason that is not the
-        ;; privileged channel's. It selects AVX2 and legacy SSE, chosen at run
-        ;; time by a `cpuid`/`xgetbv` guard. AArch64 would answer the same
-        ;; question with NEON and a different reduction order, which is a
-        ;; different operation rather than a translation of this one -- and the
-        ;; ORDER is the whole contract here, because both arms of the x86
-        ;; sequence are required to be bit-identical.
-        ;; dequant: the fused family is x86-only for the same reason and by
-        ;; the same measurement -- its two arms are AVX2 and legacy SSE, and
-        ;; the claim that binds them is that they agree BIT FOR BIT. A NEON
-        ;; arm would be a third answer nothing has compared with the other
-        ;; two.
-        dot-products (filter #(or (= :gmir/kernel-dot-f32 (:gmir/op %))
-                                  (contains? gmir/kernel-dequant-dot-operations
-                                             (:gmir/op %)))
+        ;; simd: `kernel-dot-f32` IS NO LONGER X86-ONLY (2026-09-09). The
+        ;; contract of the operation is an ORDER OF SUMMATION rather than a dot
+        ;; product, and that is exactly why an AArch64 arm was admissible only
+        ;; once it reproduced the order: `kotoba.native.machine-ir`'s
+        ;; `a64-kernel-dot-f32` is the x86 SCALAR arm instruction for
+        ;; instruction -- four accumulators, lower half before upper, then
+        ;; `(s0+s1)+(s2+s3)` -- and AArch64 scalar FMUL/FADD are IEEE-754
+        ;; round-to-nearest-even on the same operands SSE's mulss/addss are, so
+        ;; the three arms agree by construction. It is scalar and not NEON
+        ;; deliberately: the cheap NEON reduction computes a different tree.
+        ;;
+        ;; dequant: the fused family is STILL x86-only, and the reason is
+        ;; narrower than it used to be. It is not the tree any more -- the tree
+        ;; has an AArch64 spelling now -- it is that each format's per-block
+        ;; decode (an fp16 scale, a nibble split, a six-bit regroup) has no
+        ;; second arm yet. That is a gap and it is named as one below.
+        dot-products (filter #(contains? gmir/kernel-dequant-dot-operations
+                                         (:gmir/op %))
                              instructions)
         ;; boot-lit: a literal's address is x86-only today, and that is an
         ;; admission of a gap rather than a decision about AArch64. The
