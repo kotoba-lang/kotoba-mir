@@ -1402,23 +1402,32 @@
         ;; that says "the layout pass does not model X" is a statement about
         ;; an implementation, and the way to honour it is to measure it, not
         ;; to design around it. Measuring it found that X was never needed.
-        ;; boot-scratch: a function's address is `lea dst,[rip+disp32]` too,
-        ;; so it is x86-only for exactly the reason the literal is, and says
-        ;; so with its own keyword rather than borrowing the literal's -- the
-        ;; two refusals name different operations and a caller reading the
-        ;; report should not have to guess which one it wrote.
-        addresses (filter #(= :gmir/function-address (:gmir/op %)) instructions)]
+        ;; boot-scratch/adr: A FUNCTION'S ADDRESS SELECTS ON BOTH TARGETS AS
+        ;; OF 2026-09-09, for the same reason and by the same instruction as
+        ;; the literal's did earlier the same day.
+        ;;
+        ;; The refusal that stood here said a function's address is
+        ;; `lea dst,[rip+disp32]` too, "so it is x86-only for exactly the
+        ;; reason the literal is". That sentence was true and it survived its
+        ;; own premise by a few hours: the literal's reason stopped holding
+        ;; when `adr` turned out to reach the pool in one instruction, and a
+        ;; function's label is in the same emitted buffer as the code exactly
+        ;; as the pool is. Deleting the reason and leaving the conclusion is
+        ;; how a gap outlives the thing that caused it.
+        ;;
+        ;; ⚠ THE TWO KEYWORDS WERE STILL WORTH KEEPING APART while they both
+        ;; existed. `kotoba-native`'s `isa-parity` and this file's own tests
+        ;; each held a control that would have gone red if one refusal had
+        ;; been widened for both -- which is what let the literal's move on
+        ;; its own, hours before this one, with evidence for each.
+        ]
     (when (and (not= :x86-64 target) (seq privileged))
       (reject! :x86-privileged-target-mismatch
                {:target target :actions (mapv :gmir/action privileged)}))
     (when (and (not= :x86-64 target) (seq dot-products))
       (reject! :x86-simd-target-mismatch
                {:target target
-                :operations (vec (distinct (map :gmir/op dot-products)))}))
-    (when (and (not= :x86-64 target) (seq addresses))
-      (reject! :function-address-target-mismatch
-               {:target target
-                :functions (mapv :gmir/function addresses)})))
+                :operations (vec (distinct (map :gmir/op dot-products)))})))
   (validate!
    (if (= 3 (:gmir/version program))
      {:mir/version 3
