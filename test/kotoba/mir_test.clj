@@ -3361,12 +3361,37 @@
     (is (= :utf-16le-nul (:mir/rodata-encoding literal)))
     (is (= "x86-64" (namespace (:mir/dst literal))))))
 
-(deftest boot-lit-rodata-is-x86-only-and-says-so
-  (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"rodata-address-target-mismatch"
-       (mir/select-target
-        :aarch64 (boot-lit-literal-program :guid-mixed-endian
-                                           "5B1B31A1-9562-11D2-8E3F-00A0C969723B")))))
+(deftest boot-lit-rodata-selects-on-aarch64-too
+  ;; ⚠ THIS TEST REPLACES A REFUSAL, and deleting a refusal test is a silently
+  ;; passing change -- the old one asserted that AArch64 threw, so removing it
+  ;; would assert nothing at all. It therefore asserts the POSITIVE: the same
+  ;; program selects, keeps its content and encoding, and lands in an
+  ;; `aarch64`-namespaced register.
+  ;;
+  ;; The instruction that made this possible is `adr`, not `adrp`+`add`; the
+  ;; reasoning is in `select-target` beside where the refusal used to be, and
+  ;; the encoding is pinned in kotoba-native's `isa-parity` against bytes
+  ;; `clang` produced.
+  (let [selected (mir/select-target
+                  :aarch64 (boot-lit-literal-program
+                            :guid-mixed-endian
+                            "5B1B31A1-9562-11D2-8E3F-00A0C969723B"))
+        allocated (mir/allocate-registers selected)
+        literal (first (:mir/instructions allocated))]
+    (is (= :mir/rodata-address (:mir/op literal)))
+    (is (= "5B1B31A1-9562-11D2-8E3F-00A0C969723B" (:mir/content literal)))
+    (is (= :guid-mixed-endian (:mir/rodata-encoding literal)))
+    (is (= "aarch64" (namespace (:mir/dst literal))))))
+
+;; ⚠ THE CONTROL FOR THE TEST ABOVE ALREADY EXISTS and is not duplicated
+;; here: `boot-scratch-function-address-is-x86-only-under-its-own-keyword` below
+;; asserts that the OTHER x86-only address refusal in `select-target` is still
+;; standing. Two refusals sat side by side there and only one of them was a
+;; gap; that test is what goes red if removing the literal's refusal had also
+;; removed the function address's, or if the two were ever collapsed into one
+;; keyword. Written as a second copy here it would have needed a v3 module --
+;; the first attempt at one threw `:function-address-needs-a-module` instead,
+;; which is a refusal for a different reason and would have counted as a pass.
 
 (deftest boot-lit-mir-re-derives-literal-wellformedness
   ;; Selection copies content through; if only kotoba-gmir checked it, a
