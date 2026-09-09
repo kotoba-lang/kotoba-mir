@@ -1366,13 +1366,23 @@
         ;; the three arms agree by construction. It is scalar and not NEON
         ;; deliberately: the cheap NEON reduction computes a different tree.
         ;;
-        ;; dequant: the fused family is STILL x86-only, and the reason is
-        ;; narrower than it used to be. It is not the tree any more -- the tree
-        ;; has an AArch64 spelling now -- it is that each format's per-block
-        ;; decode (an fp16 scale, a nibble split, a six-bit regroup) has no
-        ;; second arm yet. That is a gap and it is named as one below.
-        dot-products (filter #(contains? gmir/kernel-dequant-dot-operations
-                                         (:gmir/op %))
+        ;; dequant: Q8_0 LEFT THIS SET ON 2026-09-09 and the K-quants did not.
+        ;; The reason was never the tree -- the tree has an AArch64 spelling --
+        ;; it is each format's per-block DECODE. Q8_0's is one fp16 scale and
+        ;; eight sign-extended bytes per group, which transliterates from the
+        ;; x86 scalar arm directly (`a64-kernel-dequant-dot`, verified against
+        ;; the assembler and executed). Q4_K's nibble split and Q6_K's six-bit
+        ;; regroup do not, and the four codebook formats need a read-only table
+        ;; on the machine before either backend can have an arm at all.
+        ;;
+        ;; The set is spelled by SUBTRACTION from gmir's rather than listed, so
+        ;; a format added upstream is refused here until someone decides
+        ;; otherwise -- the fail-closed direction.
+        aarch64-fused-dequant '#{:gmir/kernel-dequant-dot-q8-0}
+        dot-products (filter #(and (contains? gmir/kernel-dequant-dot-operations
+                                              (:gmir/op %))
+                                   (not (contains? aarch64-fused-dequant
+                                                   (:gmir/op %))))
                              instructions)
         ;; boot-lit: a literal's address is x86-only today, and that is an
         ;; admission of a gap rather than a decision about AArch64. The

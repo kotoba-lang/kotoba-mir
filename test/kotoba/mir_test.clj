@@ -3120,6 +3120,34 @@
                          :mir/second-length :mir/count)
                    emitted))))))
 
+(deftest fused-dequant-q8-0-selects-on-aarch64-too
+  ;; Q8_0 followed `kernel-dot-f32` out of the refusal on the same day. Its
+  ;; per-block decode is one binary16 scale and eight sign-extended bytes per
+  ;; group, and `kotoba.native.machine-ir/a64-kernel-dequant-dot` reproduces
+  ;; the x86 SCALAR arm's sequence for it -- including the half-precision
+  ;; EQUATION (mask, shift, multiply by 2^112, hand-written exponent-31 arm)
+  ;; rather than AArch64's own FCVT, because the two arms have to agree on
+  ;; that case and on NaN payloads and not merely on finite values.
+  ;;
+  ;; Executed, not merely emitted: seven fixtures on an arm64-apple-macos host
+  ;; on 2026-09-09, including a subnormal scale (2^-24), an infinite one, a
+  ;; negative one, and a tree fixture that answers 0x4B80000C where a
+  ;; left-to-right sum answers 0x4B800000.
+  (let [q8 (assoc simd-dot-instruction
+                  :gmir/op :gmir/kernel-dequant-dot-q8-0
+                  :gmir/maximum gmir/kernel-dequant-dot-maximum)
+        program {:gmir/version 1
+                 :gmir/instructions (conj simd-five-arguments q8
+                                          {:gmir/op :gmir/return :gmir/value v5})}
+        selected (mir/select-target :aarch64 program)
+        allocated (mir/allocate-registers selected)
+        emitted (first (filter #(= :mir/kernel-dequant-dot-q8-0 (:mir/op %))
+                               (:mir/instructions allocated)))]
+    (is (= :mir/kernel-dequant-dot-q8-0
+           (get-in selected [:mir/instructions 5 :mir/op])))
+    (is (some? emitted) "the operation survives allocation on AArch64")
+    (is (not-any? gmir/vreg? (tree-seq coll? seq allocated)))))
+
 (deftest fused-dequant-dot-is-still-x86-only
   ;; The fused family did NOT move with it, and the reason it stays is now
   ;; NARROWER than the one above: it is no longer the tree, it is that each
@@ -3131,20 +3159,41 @@
   ;; the refusal would have left the keyword with no reaching case, and a
   ;; keyword nothing reaches is indistinguishable from a keyword that no
   ;; longer works.
-  (let [q8 (assoc simd-dot-instruction
-                  :gmir/op :gmir/kernel-dequant-dot-q8-0
-                  :gmir/maximum gmir/kernel-dequant-dot-maximum)
+  (let [q4k (assoc simd-dot-instruction
+                   :gmir/op :gmir/kernel-dequant-dot-q4-k
+                   :gmir/maximum gmir/kernel-dequant-dot-maximum)
         program {:gmir/version 1
-                 :gmir/instructions (conj simd-five-arguments q8
+                 :gmir/instructions (conj simd-five-arguments q4k
                                           {:gmir/op :gmir/return :gmir/value v5})}]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
                           #"x86-simd-target-mismatch"
                           (mir/select-target :aarch64 program)))
     (testing "and it names the operation it refused, not just the target"
-      (is (= [:gmir/kernel-dequant-dot-q8-0]
+      (is (= [:gmir/kernel-dequant-dot-q4-k]
              (get-in (ex-data (try (mir/select-target :aarch64 program)
                                    (catch clojure.lang.ExceptionInfo e e)))
-                     [:instruction :operations]))))))
+                     [:instruction :operations]))))
+    (testing "the refusal is spelled by SUBTRACTION, so a new format is refused"
+      ;; `select-target` filters gmir's set MINUS the one AArch64 emits. If it
+      ;; listed the refused formats instead, a format added upstream would
+      ;; reach a backend with no arm for it and emit an empty loop body.
+      (is (= (disj gmir/kernel-dequant-dot-operations
+                   :gmir/kernel-dequant-dot-q8-0)
+             (into #{}
+                   (keep (fn [op]
+                           (let [p {:gmir/version 1
+                                    :gmir/instructions
+                                    (conj simd-five-arguments
+                                          (assoc simd-dot-instruction
+                                                 :gmir/op op
+                                                 :gmir/maximum
+                                                 gmir/kernel-dequant-dot-maximum)
+                                          {:gmir/op :gmir/return :gmir/value v5})}]
+                             (when (try (mir/select-target :aarch64 p) nil
+                                        (catch clojure.lang.ExceptionInfo _ true))
+                               op))))
+                   gmir/kernel-dequant-dot-operations))
+          "SCANNED every declared fused format"))))
 
 (deftest simd-dot-allocates-under-an-exhausted-scratch-tier
   ;; Five values live at once against a four-register scratch tier, so this is
