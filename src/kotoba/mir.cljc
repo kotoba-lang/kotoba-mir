@@ -1384,15 +1384,24 @@
                                    (not (contains? aarch64-fused-dequant
                                                    (:gmir/op %))))
                              instructions)
-        ;; boot-lit: a literal's address is x86-only today, and that is an
-        ;; admission of a gap rather than a decision about AArch64. The
-        ;; instruction is `lea dst,[rip+disp32]`; AArch64's answer is
-        ;; `adrp`+`add`, whose 4 KiB page split the layout pass does not model
-        ;; yet. Refusing here is the alternative to selecting a `:aarch64/`
-        ;; encoding that does not exist and failing later with
-        ;; `:unknown-encoding`, which reads as a compiler bug rather than as
-        ;; the missing feature it is.
-        literals (filter #(= :gmir/rodata-address (:gmir/op %)) instructions)
+        ;; boot-lit/adr: A LITERAL'S ADDRESS SELECTS ON BOTH TARGETS AS OF
+        ;; 2026-09-09, and the refusal that stood here is gone rather than
+        ;; narrowed -- `targets` holds exactly two, so a refusal for
+        ;; "not x86-64" was a refusal for AArch64 and nothing else.
+        ;;
+        ;; The refusal said the blocker was ADRP+ADD's 4 KiB page split. That
+        ;; was the wrong instruction. `adr Xd, label` reaches +/-1 MiB in ONE
+        ;; instruction with no page arithmetic at all, and the literal pool
+        ;; that `kotoba.native`'s layout pass places sits at the end of the
+        ;; same emitted buffer as the code -- so the distance is bounded by
+        ;; the size of one program, which is exactly the fact a LINKER cannot
+        ;; know and this backend can. ADRP exists for the case where the
+        ;; symbol might be four gigabytes away; that case does not arise here.
+        ;;
+        ;; ⚠ The lesson is the one this workspace's own rule names: a refusal
+        ;; that says "the layout pass does not model X" is a statement about
+        ;; an implementation, and the way to honour it is to measure it, not
+        ;; to design around it. Measuring it found that X was never needed.
         ;; boot-scratch: a function's address is `lea dst,[rip+disp32]` too,
         ;; so it is x86-only for exactly the reason the literal is, and says
         ;; so with its own keyword rather than borrowing the literal's -- the
@@ -1406,10 +1415,6 @@
       (reject! :x86-simd-target-mismatch
                {:target target
                 :operations (vec (distinct (map :gmir/op dot-products)))}))
-    (when (and (not= :x86-64 target) (seq literals))
-      (reject! :rodata-address-target-mismatch
-               {:target target
-                :encodings (mapv :gmir/rodata-encoding literals)}))
     (when (and (not= :x86-64 target) (seq addresses))
       (reject! :function-address-target-mismatch
                {:target target
