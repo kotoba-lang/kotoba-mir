@@ -3572,13 +3572,36 @@
     (is (= 'helper (:mir/function instruction)))
     (is (= "x86-64" (namespace (:mir/dst instruction))))))
 
-(deftest boot-scratch-function-address-is-x86-only-under-its-own-keyword
-  ;; Its own keyword rather than the literal's: the two refusals name
-  ;; different operations, and `adrp`+`add` is the missing translation for
-  ;; both, not one refusal covering two.
-  (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"function-address-target-mismatch"
-       (mir/select-target :aarch64 (boot-scratch-module)))))
+(deftest boot-scratch-function-address-selects-on-aarch64-too
+  ;; ⚠ THIS TEST REPLACES A REFUSAL, and so did the literal's a few hours
+  ;; earlier the same day. Both refusals said `adrp`+`add` was the missing
+  ;; translation; neither needed it. `adr` reaches +/-1 MiB in one
+  ;; instruction, and a function's label is in the same emitted buffer as the
+  ;; code exactly as the literal pool is.
+  ;;
+  ;; The two keywords were kept apart while both existed, and that is what
+  ;; let the literal's move on its own with its own evidence -- a single
+  ;; refusal covering both would have moved them together or not at all.
+  (let [allocated (mir/allocate-registers
+                   (mir/select-target :aarch64 (boot-scratch-module)))
+        instruction (first (get-in allocated [:mir/functions 0 :mir/instructions]))]
+    (is (= :mir/function-address (:mir/op instruction)))
+    (is (= 'helper (:mir/function instruction)))
+    (is (= "aarch64" (namespace (:mir/dst instruction))))))
+
+;; ⚠ THE CONTROLS FOR BOTH REPLACEMENTS ALREADY EXIST and are not duplicated
+;; here. Two of the four target refusals in `select-target` were gaps and are
+;; gone; the other two are differences between the machines and had to stay.
+;;
+;;   `x86-privileged-target-mismatch`  -- pinned by
+;;     `boot-privileged-write-msr-...` above (the `:aarch64` arm of its last
+;;     assertion)
+;;   `x86-simd-target-mismatch`        -- pinned by the Q4_K refusal test,
+;;     which also asserts that the report NAMES the operation
+;;
+;; Written as second copies here they would have needed hand-built GMIR, and
+;; the first attempt at that was refused with `:non-canonical-instruction` --
+;; a rejection for a different reason, which would have counted as a pass.
 
 (deftest boot-scratch-mir-re-derives-the-name-shape
   (is (thrown-with-msg?
