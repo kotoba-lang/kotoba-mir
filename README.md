@@ -46,5 +46,5 @@ No target backend is imported by this contract.
 ## Test
 
 ```bash
-clojure -M:test
+kbb -M:test
 ```

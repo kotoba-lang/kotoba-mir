@@ -38,7 +38,7 @@ program in the repository to serve two instructions.
 
 ## Evidence
 
-`clojure -M:test`: 86 tests, 1522 assertions, 0 failures.
+`kbb -M:test`: 86 tests, 1522 assertions, 0 failures.
 
 Three deliberate breaks, each producing the failure it names and no other:
 

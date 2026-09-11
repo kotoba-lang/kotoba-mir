@@ -62,7 +62,7 @@ duplicated, not the number.
 
 ## Verification
 
-`clojure -M:test`: 95 tests / 1962 assertions, 0 failures (was 89 / 1933).
+`kbb -M:test`: 95 tests / 1962 assertions, 0 failures (was 89 / 1933).
 
 Every new gate was shown to discriminate. Deleting all three at once — the
 liveness keys, the target rejection and the ceiling check — turns exactly four
