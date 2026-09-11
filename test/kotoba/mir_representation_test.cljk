@@ -2,7 +2,7 @@
   "Selection must depend on the VALUE of a KIR literal, not on how the host
   happens to represent it.
 
-  This repository had only `clojure -M:test` until 2026-09-08, and on the JVM
+  This repository had only `kbb -M:test` until 2026-09-08, and on the JVM
   a guest i64 is a Long, so every existing fusion test wrote its constant as
   `0` and every one of them passed. On ClojureScript a guest i64 read back
   from source or from an artifact is a JavaScript BigInt, `(zero? (js/BigInt
