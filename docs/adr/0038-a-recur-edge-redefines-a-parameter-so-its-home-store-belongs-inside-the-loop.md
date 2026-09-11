@@ -88,7 +88,7 @@ keep the position they had, so no existing object's bytes move for that reason.
 - One store executes per iteration in a direct-reentry function that spills a
   parameter. That is the cost of the value being live; the alternative was
   reading the wrong one.
-- `test/kotoba/mir_test.clj`
+- `test/kotoba/mir_test.cljk`
   `direct-reentry-spills-a-parameter-home-inside-the-loop` asserts that no
   `:mir/spill-store` precedes the `:mir/reentry` marker, on every target, and
   carries an evidence floor: the fixture must actually produce a reentry edge,
