@@ -1,7 +1,7 @@
 (ns run-tests
   "The portable slice of MIR on nbb -- the JDK-free compiler host.
 
-   nbb --classpath \"src:test:$(clojure -Spath -M:test)\" run-tests.cljs
+   nbb --classpath \"src:test:$(clojure -Spath -M:test)\" run-tests.cljk
 
    This repository had only `clojure -M:test` until 2026-09-08. Selection is
    shared by both compiler fronts, and the half that was never run silently
