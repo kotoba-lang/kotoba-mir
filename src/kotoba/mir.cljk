@@ -128,7 +128,11 @@
    ;; at 216, so `kexe_context_v5` in amu's tools/kexe_loader.c refuses any
    ;; other version and pins this number with a `_Static_assert`. Past 127,
    ;; so x86-64 takes the disp32 form like every slot since string-substring.
-   :string-index-of 216})
+   :string-index-of 216
+   ;; ABI v6 (2026-09-16, superproject ADR-2609160044): the region reset
+   ;; pair. Appended after v5's slot for the same one-directional reason; a
+   ;; v5 host has nothing at 224 / 232.
+   :arena-enter 224 :arena-leave 232})
 
 (def capability-argument-registers
   {:x86-64 {:i64 [:x86-64/rdx]

@@ -2045,6 +2045,31 @@
                                       instructions)))))
             target)))))
 
+;; ABI v6 (2026-09-16). The region reset pair selects 224 / 232 on both
+;; targets with no arguments; moved onto a v5 slot it is refused.
+(deftest abi-v6-arena-scope-selects-its-own-context-offsets
+  (doseq [[runtime offset] [[:arena-enter 224] [:arena-leave 232]]]
+    (let [program {:gmir/version 1
+                   :gmir/instructions
+                   [{:gmir/op :gmir/runtime-call :gmir/dst v0
+                     :gmir/runtime runtime :gmir/arguments []}
+                    {:gmir/op :gmir/return :gmir/value v0}]}]
+      (is (= offset (get mir/runtime-context-offsets runtime)))
+      (doseq [target mir/targets]
+        (let [selected (mir/select-target target program)
+              call (first (filter #(= :mir/runtime-call (:mir/op %))
+                                  (:mir/instructions selected)))]
+          (is (= offset (:mir/context-offset call)) [runtime target])
+          (is (thrown? clojure.lang.ExceptionInfo
+                       (mir/validate!
+                        (update selected :mir/instructions
+                                (fn [instructions]
+                                  (mapv #(if (= :mir/runtime-call (:mir/op %))
+                                           (assoc % :mir/context-offset 216)
+                                           %)
+                                        instructions)))))
+              [runtime target]))))))
+
 (deftest the-in-place-store-does-not-share-the-copying-slot
   (is (not= (:vector-assoc mir/runtime-context-offsets)
             (:vector-assoc-in-place mir/runtime-context-offsets)))
