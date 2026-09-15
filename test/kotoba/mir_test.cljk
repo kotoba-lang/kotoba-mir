@@ -2016,6 +2016,35 @@
                                           instructions)))))
                 [runtime target])))))))
 
+;; ABI v5 (2026-09-15). `string-index-of` selects the slot after the v4
+;; pair, on both targets, and validate! refuses it moved onto a v4 slot --
+;; the search returning a vector's length would be the silent failure.
+(deftest abi-v5-string-index-of-selects-its-own-context-offset
+  (let [arguments [(gmir/vreg 1) (gmir/vreg 2)]
+        program {:gmir/version 1
+                 :gmir/instructions
+                 [{:gmir/op :gmir/argument :gmir/dst (gmir/vreg 1) :gmir/index 0}
+                  {:gmir/op :gmir/argument :gmir/dst (gmir/vreg 2) :gmir/index 1}
+                  {:gmir/op :gmir/runtime-call :gmir/dst v0
+                   :gmir/runtime :string-index-of :gmir/arguments arguments}
+                  {:gmir/op :gmir/return :gmir/value v0}]}]
+    (is (= 216 (:string-index-of mir/runtime-context-offsets)))
+    (doseq [target mir/targets]
+      (let [selected (mir/select-target target program)
+            call (first (filter #(= :mir/runtime-call (:mir/op %))
+                                (:mir/instructions selected)))]
+        (is (= 216 (:mir/context-offset call)) target)
+        (is (= :string-index-of (:mir/runtime call)) target)
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (mir/validate!
+                      (update selected :mir/instructions
+                              (fn [instructions]
+                                (mapv #(if (= :mir/runtime-call (:mir/op %))
+                                         (assoc % :mir/context-offset 168)
+                                         %)
+                                      instructions)))))
+            target)))))
+
 (deftest the-in-place-store-does-not-share-the-copying-slot
   (is (not= (:vector-assoc mir/runtime-context-offsets)
             (:vector-assoc-in-place mir/runtime-context-offsets)))
