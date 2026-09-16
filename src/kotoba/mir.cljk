@@ -143,7 +143,11 @@
    :string-compare 240 :string-fold-ascii 248
    :string-find-blank 256 :string-skip-blank 264
    ;; ABI v8 (2026-09-16): the two line slots, appended after v7's four.
-   :string-index-of-from 272 :string-compare-lines 280})
+   :string-index-of-from 272 :string-compare-lines 280
+   ;; ABI v9 (2026-09-16) put six DATA pointers at 288-328 (kotoba-native
+   ;; ADR 0084) -- not slots, nothing calls them. ABI v10 (2026-09-16): the
+   ;; two range slots, appended after those.
+   :string-find-byte 336 :string-append-range 344})
 
 (def capability-argument-registers
   {:x86-64 {:i64 [:x86-64/rdx]
