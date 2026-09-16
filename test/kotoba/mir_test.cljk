@@ -2070,6 +2070,26 @@
                                         instructions)))))
               [runtime target]))))))
 
+;; ABI v7 (2026-09-16). The four text slots select 240 / 248 / 256 / 264.
+(deftest abi-v7-text-slots-select-their-own-context-offsets
+  (doseq [[runtime arity offset] [[:string-compare 2 240] [:string-fold-ascii 1 248]
+                                  [:string-find-blank 2 256] [:string-skip-blank 2 264]]]
+    (let [arguments (mapv #(gmir/vreg (inc %)) (range arity))
+          program {:gmir/version 1
+                   :gmir/instructions
+                   (into (vec (map-indexed (fn [i r] {:gmir/op :gmir/argument
+                                                      :gmir/dst r :gmir/index i})
+                                           arguments))
+                         [{:gmir/op :gmir/runtime-call :gmir/dst v0
+                           :gmir/runtime runtime :gmir/arguments arguments}
+                          {:gmir/op :gmir/return :gmir/value v0}])}]
+      (is (= offset (get mir/runtime-context-offsets runtime)))
+      (doseq [target mir/targets]
+        (let [selected (mir/select-target target program)
+              call (first (filter #(= :mir/runtime-call (:mir/op %))
+                                  (:mir/instructions selected)))]
+          (is (= offset (:mir/context-offset call)) [runtime target]))))))
+
 (deftest the-in-place-store-does-not-share-the-copying-slot
   (is (not= (:vector-assoc mir/runtime-context-offsets)
             (:vector-assoc-in-place mir/runtime-context-offsets)))
