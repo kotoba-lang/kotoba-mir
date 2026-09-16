@@ -2092,6 +2092,29 @@
                                   (:mir/instructions selected)))]
           (is (= offset (:mir/context-offset call)) [runtime target]))))))
 
+;; ABI v8 (2026-09-16). The first four-argument runtime operation: its
+;; fourth argument rides in the fourth runtime argument register, and the
+;; allocated program validates.
+(deftest a-four-argument-runtime-call-allocates-and-validates
+  (let [arguments (mapv #(gmir/vreg (inc %)) (range 4))
+        program {:gmir/version 1
+                 :gmir/instructions
+                 (into (vec (map-indexed (fn [i r] {:gmir/op :gmir/argument
+                                                    :gmir/dst r :gmir/index i})
+                                         arguments))
+                       [{:gmir/op :gmir/runtime-call :gmir/dst v0
+                         :gmir/runtime :string-compare-lines :gmir/arguments arguments}
+                        {:gmir/op :gmir/return :gmir/value v0}])}]
+    (is (= 4 (count (get mir/runtime-argument-registers :x86-64))))
+    (is (= 4 (count (get mir/runtime-argument-registers :aarch64))))
+    (doseq [target mir/targets]
+      (let [allocated (mir/allocate-registers (mir/select-target target program))
+            call (first (filter #(= :mir/runtime-call (:mir/op %))
+                                (:mir/instructions allocated)))]
+        (is (= (get mir/runtime-argument-registers target) (:mir/arguments call)) target)
+        (is (= 280 (:mir/context-offset call)) target)
+        (is (some? (mir/validate! allocated)) target)))))
+
 (deftest the-in-place-store-does-not-share-the-copying-slot
   (is (not= (:vector-assoc mir/runtime-context-offsets)
             (:vector-assoc-in-place mir/runtime-context-offsets)))

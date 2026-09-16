@@ -101,8 +101,14 @@
    :aarch64 [:aarch64/x0 :aarch64/x1 :aarch64/x2 :aarch64/x3 :aarch64/x4]})
 
 (def runtime-argument-registers
-  {:x86-64 [:x86-64/rsi :x86-64/rdx :x86-64/rcx]
-   :aarch64 [:aarch64/x1 :aarch64/x2 :aarch64/x3]})
+  "The context pointer is the first C argument (rdi / x0); a runtime
+  operation's own arguments follow in the next four. Three sufficed until
+  ABI v8 (2026-09-16): `string-compare-lines` is the first four-argument
+  runtime operation, and its fourth argument rides in the fourth C argument
+  register (rcx's successor r8, x3's successor x4), which the loader's C
+  signature receives as its fifth parameter."
+  {:x86-64 [:x86-64/rsi :x86-64/rdx :x86-64/rcx :x86-64/r8]
+   :aarch64 [:aarch64/x1 :aarch64/x2 :aarch64/x3 :aarch64/x4]})
 
 (def runtime-context-offsets
   {:pair 56 :pair-first 64 :pair-second 72
