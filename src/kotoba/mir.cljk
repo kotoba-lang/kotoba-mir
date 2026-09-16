@@ -135,7 +135,9 @@
    :arena-enter 224 :arena-leave 232
    ;; ABI v7 (2026-09-16): the four text slots, appended after v6's pair.
    :string-compare 240 :string-fold-ascii 248
-   :string-find-blank 256 :string-skip-blank 264})
+   :string-find-blank 256 :string-skip-blank 264
+   ;; ABI v8 (2026-09-16): the two line slots, appended after v7's four.
+   :string-index-of-from 272 :string-compare-lines 280})
 
 (def capability-argument-registers
   {:x86-64 {:i64 [:x86-64/rdx]
