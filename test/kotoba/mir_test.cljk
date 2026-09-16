@@ -2075,7 +2075,8 @@
 (deftest abi-v7-text-slots-select-their-own-context-offsets
   (doseq [[runtime arity offset] [[:string-compare 2 240] [:string-fold-ascii 1 248]
                                   [:string-find-blank 2 256] [:string-skip-blank 2 264]
-                                  [:string-index-of-from 3 272] [:string-compare-lines 4 280]]]
+                                  [:string-index-of-from 3 272] [:string-compare-lines 4 280]
+                                  [:string-find-byte 3 336] [:string-append-range 4 344]]]
     (let [arguments (mapv #(gmir/vreg (inc %)) (range arity))
           program {:gmir/version 1
                    :gmir/instructions
