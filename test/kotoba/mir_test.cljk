@@ -3831,3 +3831,139 @@
                    " runs before the reentry marker at index " reentry
                    ", so it executes once while the loop body reloads that slot"
                    " on every iteration")))))))
+
+;; ── stack-passed arguments (2026-09-23) ─────────────────────────────────────
+;; A call passes five arguments in registers and the rest on the stack. These
+;; pin the shape `stack-argument-rewrite` leaves after allocation, and that the
+;; validator refuses each way of getting it wrong for the reason it names.
+
+(defn- wide-vregs [n] (mapv gmir/vreg (range n)))
+
+(defn- sum-function [name arity]
+  (let [args (wide-vregs arity)
+        sums (mapv gmir/vreg (range arity (* 2 arity)))]
+    {:gmir/name name
+     :gmir/arity arity
+     :gmir/instructions
+     (vec (concat
+           (map-indexed (fn [i v] {:gmir/op :gmir/argument :gmir/dst v :gmir/index i})
+                        args)
+           (map (fn [i]
+                  {:gmir/op :gmir/add :gmir/dst (sums i)
+                   :gmir/left (if (= 1 i) (args 0) (sums (dec i)))
+                   :gmir/right (args i)})
+                (range 1 arity))
+           [{:gmir/op :gmir/return :gmir/value (sums (dec arity))}]))}))
+
+(defn- wide-call-module [arity tail?]
+  (let [args (wide-vregs arity)
+        result (gmir/vreg arity)]
+    {:gmir/version 3
+     :gmir/entry 'main
+     :gmir/functions
+     [(sum-function 'sum-wide arity)
+      {:gmir/name 'main
+       :gmir/arity 0
+       :gmir/instructions
+       (vec (concat
+             (map-indexed (fn [i v] {:gmir/op :gmir/constant :gmir/dst v :gmir/value (inc i)})
+                          args)
+             (if tail?
+               [{:gmir/op :gmir/tail-call :gmir/callee 'sum-wide :gmir/arguments args}]
+               [{:gmir/op :gmir/call :gmir/dst result :gmir/callee 'sum-wide
+                 :gmir/arguments args}
+                {:gmir/op :gmir/return :gmir/value result}])))}]}))
+
+(defn- ops-with [op instructions]
+  (filterv #(= op (:mir/op %)) instructions))
+
+(defn- rejection-problem [f]
+  (try (f) nil
+       (catch clojure.lang.ExceptionInfo e
+         (:problem (ex-data e)))))
+
+(deftest a-seven-argument-call-stores-two-arguments-on-the-stack
+  (doseq [target mir/targets
+          tail? [false true]]
+    (let [allocated (mir/allocate-registers
+                     (mir/select-target target (wide-call-module 7 tail?)))
+          [callee caller] (:mir/functions allocated)
+          registers (get mir/call-argument-registers target)
+          call-op (if tail? :mir/tail-call :mir/call)
+          store-op (if tail? :mir/incoming-argument-store :mir/outgoing-argument)
+          call (first (ops-with call-op (:mir/instructions caller)))]
+      (is (= 5 (count registers)) target)
+      (is (= (subvec registers 0 5) (:mir/arguments call)) [target tail?])
+      (is (= [5 6] (mapv :mir/index (ops-with store-op (:mir/instructions caller))))
+          [target tail? "arguments 5 and 6 go to the stack, once each"])
+      (is (empty? (ops-with (if tail? :mir/outgoing-argument
+                                      :mir/incoming-argument-store)
+                            (:mir/instructions caller)))
+          [target tail? "the other area is never written"])
+      (is (= [0 1 2 3 4] (mapv :mir/index (ops-with :mir/argument (:mir/instructions callee))))
+          target)
+      (is (= [5 6] (mapv :mir/index (ops-with :mir/incoming-load (:mir/instructions callee))))
+          target)
+      (is (= allocated (mir/validate! allocated)) target))))
+
+(deftest five-arguments-need-no-stack-instruction
+  (doseq [target mir/targets]
+    (let [allocated (mir/allocate-registers
+                     (mir/select-target target (wide-call-module 5 false)))]
+      (is (not-any? #(contains? #{:mir/incoming-load :mir/outgoing-argument
+                                  :mir/incoming-argument-store}
+                                (:mir/op %))
+                    (tree-seq coll? seq allocated))
+          target))))
+
+(defn- edit-caller [allocated f]
+  (update-in allocated [:mir/functions 1 :mir/instructions] (comp vec f)))
+
+(defn- stack-store? [op index instruction]
+  (and (= op (:mir/op instruction)) (= index (:mir/index instruction))))
+
+(deftest a-missing-or-misplaced-stack-argument-is-refused-for-that-reason
+  (doseq [target mir/targets]
+    (let [allocated (mir/allocate-registers
+                     (mir/select-target target (wide-call-module 7 false)))
+          refused (fn [f] (rejection-problem
+                           #(mir/validate! (edit-caller allocated f))))]
+      (is (= :stack-argument-profile-violation
+             (refused (fn [instructions]
+                        (remove #(stack-store? :mir/outgoing-argument 6 %)
+                                instructions))))
+          [target "argument 6 never stored"])
+      (is (= :stack-argument-profile-violation
+             (refused (fn [instructions]
+                        (map #(if (= :mir/outgoing-argument (:mir/op %))
+                                (assoc % :mir/op :mir/incoming-argument-store)
+                                %)
+                             instructions))))
+          [target "a plain call writing the incoming area"])
+      (is (= :stack-argument-index-invalid
+             (refused (fn [instructions]
+                        (map #(if (stack-store? :mir/outgoing-argument 5 %)
+                                (assoc % :mir/index 4)
+                                %)
+                             instructions))))
+          [target "index 4 is a register argument"]))))
+
+(deftest arity-is-bounded-at-sixty-four
+  (is (= 64 gmir/max-arity))
+  (doseq [target mir/targets]
+    (let [allocated (mir/allocate-registers
+                     (mir/select-target target (wide-call-module 64 false)))
+          caller (second (:mir/functions allocated))]
+      (is (= (vec (range 5 64))
+             (mapv :mir/index (ops-with :mir/outgoing-argument (:mir/instructions caller))))
+          target))
+    (let [virtual (mir/select-target target (wide-call-module 64 false))
+          widened (-> virtual
+                      (assoc-in [:mir/functions 0 :mir/arity] 65)
+                      (update-in [:mir/functions 0 :mir/instructions]
+                                 #(vec (cons {:mir/op :mir/argument
+                                              :mir/dst (gmir/vreg 999)
+                                              :mir/index 64}
+                                             %))))]
+      (is (= :non-canonical-function (rejection-problem #(mir/validate! widened)))
+          [target "65 is one past the bound"]))))
