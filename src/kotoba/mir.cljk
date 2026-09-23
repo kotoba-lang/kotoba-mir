@@ -179,6 +179,11 @@
   (throw (ex-info (str "MIR rejected: " (name problem))
                   {:phase :mir :problem problem :instruction instruction})))
 
+(declare call-argument-registers)
+
+(def ^:private stack-argument-ops
+  #{:mir/incoming-load :mir/outgoing-argument :mir/incoming-argument-store})
+
 (def instruction-keysets
   {:mir/argument #{:mir/op :mir/dst :mir/index}
    :mir/constant #{:mir/op :mir/dst :mir/value}
@@ -359,6 +364,22 @@
    :mir/spill-load #{:mir/op :mir/dst :mir/slot}
    :mir/spill-store #{:mir/op :mir/src :mir/slot}
    :mir/move #{:mir/op :mir/dst :mir/src}
+   ;; Stack-passed arguments (2026-09-23). A call passes its first five
+   ;; arguments in `call-argument-registers` and every one after that on the
+   ;; stack, at the bottom of the caller's frame: argument i (i >= 5) at
+   ;; [sp + 8(i - 5)]. The callee reads it from that INCOMING area, above its
+   ;; own frame; where that is depends on frame sizes only the encoder knows,
+   ;; so these name the argument by index, never by offset.
+   ;;
+   ;; They are introduced by `stack-argument-rewrite`, before allocation, and
+   ;; are ordinary instructions to the allocators: `incoming-load` defines a
+   ;; value, the two stores read one. All barriers to scheduling.
+   :mir/incoming-load #{:mir/op :mir/dst :mir/index}
+   :mir/outgoing-argument #{:mir/op :mir/src :mir/index}
+   ;; A tail call writes the callee's stack arguments into its OWN incoming
+   ;; area. Safe because every incoming argument was loaded at entry, before
+   ;; anything in the body could run.
+   :mir/incoming-argument-store #{:mir/op :mir/src :mir/index}
    ;; Physical-only AArch64 self-tail re-entry. The boundary carries the
    ;; allocator-owned parameter homes; recur edges have already performed the
    ;; simultaneous assignment into exactly those registers.
@@ -580,23 +601,27 @@
           (when-not (and (= 3 version)
                          (gmir/function-id? (:mir/callee instruction))
                          (vector? (:mir/arguments instruction))
-                         (<= (count (:mir/arguments instruction)) 5))
+                         (<= (count (:mir/arguments instruction)) gmir/max-arity))
             (reject! :invalid-call instruction))
           (when (= :physical registers)
+            ;; A physical call names only the argument REGISTERS; arguments
+            ;; past the fifth were stored into the frame before it.
             (when-not (and (or (= op :mir/tail-call)
                                (= (:mir/dst instruction)
                                   (get return-registers target)))
+                           (<= (count (:mir/arguments instruction))
+                               (count (get call-argument-registers target)))
                            (= (:mir/arguments instruction)
                               (subvec (get call-argument-registers target)
                                       0 (count (:mir/arguments instruction)))))
               (reject! :physical-call-profile-violation instruction))))
         (when (= :mir/reentry op)
           (when-not (and (vector? (:mir/parameters instruction))
-                         (<= (count (:mir/parameters instruction)) 5))
+                         (<= (count (:mir/parameters instruction)) gmir/max-arity))
             (reject! :invalid-direct-reentry instruction)))
         (when (= :mir/recur op)
           (when-not (and (vector? (:mir/arguments instruction))
-                         (<= (count (:mir/arguments instruction)) 5))
+                         (<= (count (:mir/arguments instruction)) gmir/max-arity))
             (reject! :invalid-direct-recur instruction)))
         (when (= op :mir/runtime-call)
           (let [runtime (:mir/runtime instruction)
@@ -675,6 +700,12 @@
                          (<= 0 (:mir/slot instruction))
                          (< (:mir/slot instruction) frame-slots))
             (reject! :spill-slot-invalid instruction)))
+        (when (contains? stack-argument-ops op)
+          (when-not (and (integer? (:mir/index instruction))
+                         (<= (count (get call-argument-registers target))
+                             (:mir/index instruction))
+                         (< (:mir/index instruction) gmir/max-arity))
+            (reject! :stack-argument-index-invalid instruction)))
         (when (contains? #{:mir/label :mir/branch-zero :mir/branch-nonzero
                            :mir/jump} op)
           (let [id (if (= op :mir/label) (:mir/id instruction) (:mir/target instruction))]
@@ -799,7 +830,7 @@
                                               (:mir/op %)) instructions)]
         (when-not (and (= expected-keys (set (keys function)))
                        (gmir/function-id? name)
-                       (integer? arity) (<= 0 arity 5)
+                       (integer? arity) (<= 0 arity gmir/max-arity)
                        (or (= :virtual registers)
                            (contains? #{:allocator :all-vregs :call-live}
                                       frame-policy)))
@@ -809,12 +840,19 @@
                   :mir/instructions instructions}
            (= :physical registers) (assoc :mir/frame-slots frame-slots)))
         (when (= :physical registers)
-          (let [arguments (filterv #(= :mir/argument (:mir/op %)) instructions)
+          ;; Arguments past the register count arrive on the stack and are
+          ;; read by `:mir/incoming-load`, so only the register ones are
+          ;; `:mir/argument` markers here.
+          (let [register-arity (min arity (count (get call-argument-registers target)))
+                arguments (filterv #(= :mir/argument (:mir/op %)) instructions)
                 expected-registers (subvec (get call-argument-registers target)
-                                           0 arity)]
-            (when-not (and (= arity (count arguments))
-                           (= (vec (range arity)) (mapv :mir/index arguments))
-                           (= expected-registers (mapv :mir/dst arguments)))
+                                           0 register-arity)]
+            (when-not (and (= register-arity (count arguments))
+                           (= (vec (range register-arity)) (mapv :mir/index arguments))
+                           (= expected-registers (mapv :mir/dst arguments))
+                           (every? #(< (:mir/index %) arity)
+                                   (filter #(= :mir/incoming-load (:mir/op %))
+                                           instructions)))
               (reject! :entry-argument-profile-violation
                        {:function name :arguments arguments}))))
         (when (and (= :physical registers)
@@ -823,7 +861,8 @@
                      (not= :allocator frame-policy)))
           (reject! :call-frame-policy-violation function))
         (when (= :physical registers)
-          (let [reentries (filterv #(= :mir/reentry (:mir/op %)) instructions)
+          (let [register-arity (min arity (count (get call-argument-registers target)))
+                reentries (filterv #(= :mir/reentry (:mir/op %)) instructions)
                 recurs (filterv #(= :mir/recur (:mir/op %)) instructions)
                 reentry-index (first (keep-indexed
                                       #(when (= :mir/reentry (:mir/op %2)) %1)
@@ -838,12 +877,12 @@
                         (map-indexed vector instructions))]
             (when-not (if (seq recurs)
                         (and (= 1 (count reentries))
-                             (= arity (count (:mir/parameters (first reentries))))
-                             (= arity
+                             (= register-arity (count (:mir/parameters (first reentries))))
+                             (= register-arity
                                 (count (distinct
                                         (:mir/parameters (first reentries)))))
                              (valid-direct-reentry-prefix?
-                              target arity instructions reentry-index
+                              target register-arity instructions reentry-index
                               (:mir/parameters (first reentries)))
                              recur-terminates?
                              (every? #(= (:mir/parameters (first reentries))
@@ -920,12 +959,59 @@
                   (reject! :non-parallel-call-arguments
                            {:function name :call call}))))))
         (doseq [{:mir/keys [callee arguments] :as call} direct-calls]
-          (let [callee-arity (get signatures callee ::missing)]
+          (let [callee-arity (get signatures callee ::missing)
+                register-count (count (get call-argument-registers target))]
             (when (= ::missing callee-arity)
               (reject! :unresolved-callee call))
-            (when-not (= callee-arity (count arguments))
+            ;; Virtual MIR names every argument. Physical MIR names the
+            ;; register ones; the rest were stored just before the call.
+            (when-not (= (if (and (= :physical registers)
+                                  (> callee-arity register-count))
+                           register-count
+                           callee-arity)
+                         (count arguments))
               (reject! :call-arity-mismatch
-                       {:function name :call call :expected callee-arity})))))))
+                       {:function name :call call :expected callee-arity}))))
+        ;; Every stack argument a physical call needs is stored between the
+        ;; previous call and it, exactly once, into the area its kind reads:
+        ;; the frame's outgoing area for a call, the function's own incoming
+        ;; area for a tail call.
+        (when (= :physical registers)
+          (let [register-count (count (get call-argument-registers target))]
+            (when-let [left
+                       (seq
+            (reduce
+             (fn [pending [index {:mir/keys [op callee] :as instruction}]]
+               (cond
+                 (contains? #{:mir/outgoing-argument :mir/incoming-argument-store} op)
+                 (conj pending instruction)
+
+                 ;; A direct recur IS a self tail call (the allocator turned
+                 ;; it into a jump), so it consumes the incoming-area stores
+                 ;; exactly as one would.
+                 (or (call-operation? op) (= :mir/recur op))
+                 (let [callee-arity (cond
+                                      (contains? #{:mir/call :mir/tail-call} op)
+                                      (get signatures callee 0)
+                                      (= :mir/recur op) arity
+                                      :else 0)
+                       expected-op (if (contains? #{:mir/tail-call :mir/recur} op)
+                                     :mir/incoming-argument-store
+                                     :mir/outgoing-argument)
+                       wanted (set (range register-count (max register-count callee-arity)))]
+                   (when-not (and (= wanted (set (map :mir/index pending)))
+                                  (= (count wanted) (count pending))
+                                  (every? #(= expected-op (:mir/op %)) pending))
+                     (reject! :stack-argument-profile-violation
+                              {:function name :call instruction
+                               :stores pending}))
+                   [])
+
+                 :else pending))
+             []
+             (map-indexed vector instructions)))]
+              (reject! :stack-argument-profile-violation
+                       {:function name :stores (vec left)})))))))
   module)
 
 (defn validate!
@@ -3024,6 +3110,59 @@
                (if calls? :all-vregs :allocator)]
               (throw error))))))))
 
+;; ── stack-passed arguments ──────────────────────────────────────────────────
+;;
+;; Rewrites a virtual function so that nothing downstream of it has to know an
+;; argument can live anywhere but a register:
+;;
+;;   :mir/argument, index i >= 5    -> :mir/incoming-load i
+;;   :mir/call with n > 5 arguments -> :mir/outgoing-argument for 5..n-1,
+;;                                     then the call with the first five
+;;   :mir/tail-call, n > 5          -> :mir/incoming-argument-store for
+;;                                     5..n-1, then the tail call
+;;
+;; The loads are placed right after the argument prefix, where the entry plan
+;; ends -- and after a direct-reentry marker, so a self-tail loop reloads them
+;; from the incoming area its own tail call just rewrote. The stores sit
+;; immediately before their call, after every argument value is computed,
+;; so nothing between them can reach the stack area they write.
+;;
+;; A function with no stack arguments comes back unchanged, and its
+;; allocation is byte-for-byte what it was.
+
+(defn- stack-argument-rewrite [instructions target]
+  (let [limit (count (get call-argument-registers target))
+        stack? (fn [{:mir/keys [op index arguments]}]
+                 (or (and (= :mir/argument op) (>= index limit))
+                     (and (contains? #{:mir/call :mir/tail-call} op)
+                          (> (count arguments) limit))))]
+    (if-not (some stack? instructions)
+      instructions
+      (let [[arguments body] (split-with #(= :mir/argument (:mir/op %)) instructions)
+            register-arguments (filterv #(< (:mir/index %) limit) arguments)
+            loads (->> arguments
+                       (filter #(>= (:mir/index %) limit))
+                       (mapv (fn [{:mir/keys [dst index]}]
+                               {:mir/op :mir/incoming-load :mir/dst dst
+                                :mir/index index})))
+            calls (mapcat
+                   (fn [{:mir/keys [op arguments] :as instruction}]
+                     (if (and (contains? #{:mir/call :mir/tail-call} op)
+                              (> (count arguments) limit))
+                       (let [store (if (= op :mir/call)
+                                     :mir/outgoing-argument
+                                     :mir/incoming-argument-store)]
+                         (conj (vec (map-indexed
+                                     (fn [k value]
+                                       {:mir/op store :mir/src value
+                                        :mir/index (+ limit k)})
+                                     (drop limit arguments)))
+                               (assoc instruction :mir/arguments
+                                      (subvec arguments 0 limit))))
+                       [instruction]))
+                   body)]
+        (vec (concat register-arguments loads calls))))))
+
 (defn- allocate-flat
   "Allocate virtual MIR deterministically. No-call bodies spill only values
   that do not fit. Call-containing bodies use the same scanner, keeping
@@ -3057,7 +3196,8 @@
         (mapv (fn [{:mir/keys [name arity instructions]}]
                 (let [virtual {:mir/version 3 :mir/target target
                                :mir/registers :virtual
-                               :mir/instructions instructions}
+                               :mir/instructions (stack-argument-rewrite
+                                                  instructions target)}
                       ;; Straight-line call functions previously took
                       ;; allocate-call-live first, which routes every
                       ;; call-crossing value through a stable slot. The
