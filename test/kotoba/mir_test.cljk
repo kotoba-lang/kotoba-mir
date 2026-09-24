@@ -1,5 +1,5 @@
 (ns kotoba.mir-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.gmir :as gmir]
             [kotoba.lang.coll]
             [kotoba.mir :as mir]))
