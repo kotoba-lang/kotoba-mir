@@ -1,7 +1,7 @@
 (ns kotoba.mir-test
   (:require [clojure.test :refer [deftest is testing]]
             [kotoba.gmir :as gmir]
-            [clojure.set]
+            [kotoba.lang.coll]
             [kotoba.mir :as mir]))
 
 (defmacro with-scratch-tier-only
@@ -2264,12 +2264,12 @@
     (let [scratch (set (get mir/physical-registers target))
           leaf (set (get mir/leaf-registers target))
           preserved (set (get mir/preserved-registers target))]
-      (is (empty? (clojure.set/intersection scratch leaf)) target)
-      (is (empty? (clojure.set/intersection scratch preserved)) target)
-      (is (empty? (clojure.set/intersection leaf preserved)) target)
+      (is (empty? (kotoba.lang.coll/intersection scratch leaf)) target)
+      (is (empty? (kotoba.lang.coll/intersection scratch preserved)) target)
+      (is (empty? (kotoba.lang.coll/intersection leaf preserved)) target)
       ;; A callee-saved register the caller also passes arguments in would be
       ;; saved and clobbered by the same function.
-      (is (empty? (clojure.set/intersection
+      (is (empty? (kotoba.lang.coll/intersection
                    preserved (set (get mir/call-argument-registers target))))
           target))))
 
