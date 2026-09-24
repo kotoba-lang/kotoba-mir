@@ -147,7 +147,10 @@
    ;; ABI v9 (2026-09-16) put six DATA pointers at 288-328 (kotoba-native
    ;; ADR 0084) -- not slots, nothing calls them. ABI v10 (2026-09-16): the
    ;; two range slots, appended after those.
-   :string-find-byte 336 :string-append-range 344})
+   :string-find-byte 336 :string-append-range 344
+   ;; ABI v11 (2026-09-25, superproject adr-2609242330): the string
+   ;; constructor and the three bytes slots the vector table cannot express.
+   :string-from-utf8 352 :bytes-from-vector 360 :bytes-slice 368 :bytes-concat 376})
 
 (def capability-argument-registers
   {:x86-64 {:i64 [:x86-64/rdx]
