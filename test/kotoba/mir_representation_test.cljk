@@ -20,7 +20,7 @@
   i64 exactly, a closure-bearing artifact was refused as \"native instruction
   stream rejected\" -- correctly, by a verifier that cannot tell its caller's
   representation from a tampered artifact."
-  (:require [clojure.test :as t :refer [deftest is testing]]
+  (:require [kotoba.test :as t :refer [deftest is testing]]
             [kotoba.gmir :as gmir]
             [kotoba.mir :as mir]))
 
