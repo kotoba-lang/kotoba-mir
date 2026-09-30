@@ -2118,6 +2118,33 @@
         (is (= 280 (:mir/context-offset call)) target)
         (is (some? (mir/validate! allocated)) target)))))
 
+;; amu ADR 0353 floor :allocation-budget-native: the per-constructor fuel
+;; debit addresses the context's fuel word, which no host slot shares; moved
+;; onto a slot it is refused.
+(deftest the-fuel-charge-addresses-the-fuel-word
+  (let [program {:gmir/version 1
+                 :gmir/instructions
+                 [{:gmir/op :gmir/runtime-call :gmir/dst v0
+                   :gmir/runtime :fuel-charge :gmir/arguments []}
+                  {:gmir/op :gmir/return :gmir/value v0}]}]
+    (is (= 8 (:fuel-charge mir/runtime-context-offsets)))
+    (is (not-any? #{8} (vals (dissoc mir/runtime-context-offsets :fuel-charge))))
+    (doseq [target mir/targets]
+      (let [selected (mir/select-target target program)
+            call (first (filter #(= :mir/runtime-call (:mir/op %))
+                                (:mir/instructions selected)))]
+        (is (= 8 (:mir/context-offset call)) target)
+        (is (some? (mir/validate! (mir/allocate-registers selected))) target)
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (mir/validate!
+                      (update selected :mir/instructions
+                              (fn [instructions]
+                                (mapv #(if (= :mir/runtime-call (:mir/op %))
+                                         (assoc % :mir/context-offset 56)
+                                         %)
+                                      instructions)))))
+            target)))))
+
 (deftest the-in-place-store-does-not-share-the-copying-slot
   (is (not= (:vector-assoc mir/runtime-context-offsets)
             (:vector-assoc-in-place mir/runtime-context-offsets)))

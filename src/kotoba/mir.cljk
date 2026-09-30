@@ -150,7 +150,13 @@
    :string-find-byte 336 :string-append-range 344
    ;; ABI v11 (2026-09-25, superproject adr-2609242330): the string
    ;; constructor and the three bytes slots the vector table cannot express.
-   :string-from-utf8 352 :bytes-from-vector 360 :bytes-slice 368 :bytes-concat 376})
+   :string-from-utf8 352 :bytes-from-vector 360 :bytes-slice 368 :bytes-concat 376
+   ;; amu ADR 0353 floor :allocation-budget-native (2026-09-30): the
+   ;; per-constructor fuel debit. Not a slot -- 8 is the context's FUEL word
+   ;; (context v2 onward), the one the entry prefix already decrements, and
+   ;; kotoba-native encodes the call inline as that same decrement. No host
+   ;; is asked anything, so no context version moves.
+   :fuel-charge 8})
 
 (def capability-argument-registers
   {:x86-64 {:i64 [:x86-64/rdx]
