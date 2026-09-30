@@ -1,7 +1,11 @@
 (ns kotoba.mir
   "Closed target-selected Machine IR and deterministic allocation."
   {:kotoba/export [allocate-registers allocator-pool call-argument-registers capability-argument-registers capability-context-offsets counted-self-recur-plan counted-self-recur-plans instruction-keysets kernel-atomic-ops kernel-dequant-dot-maximum kernel-dequant-dot-operations kernel-dot-f32-maximum kernel-window-maxima kernel-window-operations leaf-registers physical-registers preserved-registers privileged-argument-registers return-registers runtime-argument-registers runtime-context-offsets saved-registers select-target slice-item-limit slice-operations supported-versions targets validate! version]}
+  #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
+                                          [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
+                                 :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]}))
   (:require [kotoba.lang.coll :as set]
+            #?(:kotoba [kotoba.form :as form])
             [kotoba.gmir :as gmir]))
 
 (def version 3)
@@ -187,220 +191,227 @@
 (def ^:private stack-argument-ops
   #{:mir/incoming-load :mir/outgoing-argument :mir/incoming-argument-store})
 
-(def instruction-keysets
-  {:mir/argument #{:mir/op :mir/dst :mir/index}
-   :mir/constant #{:mir/op :mir/dst :mir/value}
-   :mir/data-address #{:mir/op :mir/dst :mir/content}
-   ;; boot-lit: the address of a read-only literal placed in the code image
-   ;; (kotoba-gmir ADR-0011). Distinct from `:mir/data-address` above, which
-   ;; is a managed string the value runtime resolves against a runtime base.
-   :mir/rodata-address #{:mir/op :mir/dst :mir/content :mir/rodata-encoding}
-   ;; boot-scratch: the address of a function in the same module (kotoba-gmir
-   ;; ADR-0013). One destination, no sources, and a NAME -- the same shape as
-   ;; the literal above, with a symbol where that one has a string.
-   :mir/function-address #{:mir/op :mir/dst :mir/function}
-   :mir/add #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/subtract #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/multiply #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/multiply-add #{:mir/op :mir/dst :mir/left :mir/right :mir/addend}
-   :mir/multiply-subtract #{:mir/op :mir/dst :mir/left :mir/right :mir/addend}
-   :mir/quotient #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/quotient-constant #{:mir/op :mir/dst :mir/left :mir/divisor}
-   :mir/bit-and #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/bit-or #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/bit-xor #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/shift-left #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/shift-right-signed #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/shift-right-unsigned #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-add #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-subtract #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-multiply #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-divide #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-min #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-max #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-sqrt #{:mir/op :mir/dst :mir/input}
-   :mir/f64-equal #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-less-than #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-less-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-greater-than #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f64-unordered #{:mir/op :mir/dst :mir/left :mir/right}
-   ;; f32: binary32 (kotoba-lang ADR-kotoba-floating-point-on-native). Same
-   ;; operand shapes and the same one-word vreg as the f64 family above -- an
-   ;; f32 travels as its binary32 pattern sign-extended from bit 31.
-   ;;
-   ;; No f32-min/f32-max, and the absence is the decision: x86 MINSS/MAXSS
-   ;; return the SECOND operand when either input is NaN while AArch64 FMIN and
-   ;; the KIR oracle return the NaN, so :mir/f64-min above already means two
-   ;; things on the two targets. Recorded upstream, not inherited here.
-   :mir/f32-add #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f32-subtract #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f32-multiply #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f32-divide #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f32-sqrt #{:mir/op :mir/dst :mir/input}
-   :mir/f32-equal #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f32-less-than #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f32-less-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f32-greater-than #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f32-greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/f32-unordered #{:mir/op :mir/dst :mir/left :mir/right}
-   ;; Width conversions -- one source in, one value out, exactly like f32-sqrt.
-   :mir/f32-to-f64 #{:mir/op :mir/dst :mir/input}
-   :mir/f64-to-f32 #{:mir/op :mir/dst :mir/input}
-   :mir/i64-to-f32 #{:mir/op :mir/dst :mir/input}
-   :mir/i64-to-f64 #{:mir/op :mir/dst :mir/input}
-   :mir/kernel-load-u8 #{:mir/op :mir/dst :mir/base :mir/length
-                         :mir/index :mir/maximum}
-   :mir/kernel-store-u8 #{:mir/op :mir/dst :mir/base :mir/length
-                          :mir/index :mir/stored :mir/maximum}
-   :mir/kernel-load-u32 #{:mir/op :mir/dst :mir/base :mir/length
-                          :mir/index :mir/maximum}
-   :mir/kernel-store-u32 #{:mir/op :mir/dst :mir/base :mir/length
-                           :mir/index :mir/stored :mir/maximum}
-   ;; memwidth: the two remaining MMIO transfer widths, and the slice family.
-   ;; Every one carries exactly the fields its u8/u32 sibling does -- the width
-   ;; is in the operation name, and for the slice family the only other
-   ;; difference is that `:mir/index` counts elements rather than bytes.
-   :mir/kernel-load-u16 #{:mir/op :mir/dst :mir/base :mir/length
-                          :mir/index :mir/maximum}
-   :mir/kernel-store-u16 #{:mir/op :mir/dst :mir/base :mir/length
-                           :mir/index :mir/stored :mir/maximum}
-   :mir/kernel-load-u64 #{:mir/op :mir/dst :mir/base :mir/length
-                          :mir/index :mir/maximum}
-   :mir/kernel-store-u64 #{:mir/op :mir/dst :mir/base :mir/length
-                           :mir/index :mir/stored :mir/maximum}
-   :mir/slice-load-u8 #{:mir/op :mir/dst :mir/base :mir/length
-                        :mir/index :mir/maximum}
-   :mir/slice-store-u8 #{:mir/op :mir/dst :mir/base :mir/length
-                         :mir/index :mir/stored :mir/maximum}
-   :mir/slice-load-u16 #{:mir/op :mir/dst :mir/base :mir/length
-                         :mir/index :mir/maximum}
-   :mir/slice-store-u16 #{:mir/op :mir/dst :mir/base :mir/length
-                          :mir/index :mir/stored :mir/maximum}
-   :mir/slice-load-u32 #{:mir/op :mir/dst :mir/base :mir/length
-                         :mir/index :mir/maximum}
-   :mir/slice-store-u32 #{:mir/op :mir/dst :mir/base :mir/length
-                          :mir/index :mir/stored :mir/maximum}
-   :mir/slice-load-u64 #{:mir/op :mir/dst :mir/base :mir/length
-                         :mir/index :mir/maximum}
-   :mir/slice-store-u64 #{:mir/op :mir/dst :mir/base :mir/length
-                          :mir/index :mir/stored :mir/maximum}
-   ;; memwidth: end
-   ;; The lock pair carries the load's fields: three sources in, one value
-   ;; out. No `:mir/stored` -- the stored word is fixed by the operation, not
-   ;; supplied by the guest.
-   :mir/kernel-try-lock-u32 #{:mir/op :mir/dst :mir/base :mir/length
-                              :mir/index :mir/maximum}
-   :mir/kernel-unlock-u32 #{:mir/op :mir/dst :mir/base :mir/length
+#?(:kotoba
+   ;; The 103-entry table exceeds the record field limit as a keyword-keyed map
+   ;; literal, so on this route it is the Form of its EDN text (same table, same
+   ;; sets); `instruction-op?` / `instruction-keyset` are the lookups.
+   (defn instruction-keysets [] [:ref :form/r]
+     (form/edn-form "{:mir/add #{:mir/dst :mir/left :mir/op :mir/right}, :mir/argument #{:mir/dst :mir/index :mir/op}, :mir/bit-and #{:mir/dst :mir/left :mir/op :mir/right}, :mir/bit-or #{:mir/dst :mir/left :mir/op :mir/right}, :mir/bit-xor #{:mir/dst :mir/left :mir/op :mir/right}, :mir/branch-nonzero #{:mir/op :mir/target :mir/test}, :mir/branch-zero #{:mir/op :mir/target :mir/test}, :mir/call #{:mir/arguments :mir/callee :mir/dst :mir/op}, :mir/capability-call #{:mir/arguments :mir/capability :mir/context-offset :mir/dst :mir/kind :mir/op}, :mir/constant #{:mir/dst :mir/op :mir/value}, :mir/data-address #{:mir/content :mir/dst :mir/op}, :mir/equal #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f32-add #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f32-divide #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f32-equal #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f32-greater-or-equal #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f32-greater-than #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f32-less-or-equal #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f32-less-than #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f32-multiply #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f32-sqrt #{:mir/dst :mir/input :mir/op}, :mir/f32-subtract #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f32-to-f64 #{:mir/dst :mir/input :mir/op}, :mir/f32-unordered #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-add #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-divide #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-equal #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-greater-or-equal #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-greater-than #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-less-or-equal #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-less-than #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-max #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-min #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-multiply #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-sqrt #{:mir/dst :mir/input :mir/op}, :mir/f64-subtract #{:mir/dst :mir/left :mir/op :mir/right}, :mir/f64-to-f32 #{:mir/dst :mir/input :mir/op}, :mir/f64-unordered #{:mir/dst :mir/left :mir/op :mir/right}, :mir/function-address #{:mir/dst :mir/function :mir/op}, :mir/greater-or-equal #{:mir/dst :mir/left :mir/op :mir/right}, :mir/greater-than #{:mir/dst :mir/left :mir/op :mir/right}, :mir/i64-to-f32 #{:mir/dst :mir/input :mir/op}, :mir/i64-to-f64 #{:mir/dst :mir/input :mir/op}, :mir/incoming-argument-store #{:mir/index :mir/op :mir/src}, :mir/incoming-load #{:mir/dst :mir/index :mir/op}, :mir/jump #{:mir/op :mir/target}, :mir/kernel-atomic-add-u32 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/kernel-atomic-add-u64 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/kernel-cmpxchg-u32 #{:mir/base :mir/dst :mir/expected :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/kernel-cmpxchg-u64 #{:mir/base :mir/dst :mir/expected :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/kernel-dequant-dot-iq2-s #{:mir/base :mir/count :mir/dst :mir/length :mir/maximum :mir/op :mir/second-base :mir/second-length}, :mir/kernel-dequant-dot-iq3-s #{:mir/base :mir/count :mir/dst :mir/length :mir/maximum :mir/op :mir/second-base :mir/second-length}, :mir/kernel-dequant-dot-iq3-xxs #{:mir/base :mir/count :mir/dst :mir/length :mir/maximum :mir/op :mir/second-base :mir/second-length}, :mir/kernel-dequant-dot-iq4-xs #{:mir/base :mir/count :mir/dst :mir/length :mir/maximum :mir/op :mir/second-base :mir/second-length}, :mir/kernel-dequant-dot-q4-k #{:mir/base :mir/count :mir/dst :mir/length :mir/maximum :mir/op :mir/second-base :mir/second-length}, :mir/kernel-dequant-dot-q6-k #{:mir/base :mir/count :mir/dst :mir/length :mir/maximum :mir/op :mir/second-base :mir/second-length}, :mir/kernel-dequant-dot-q8-0 #{:mir/base :mir/count :mir/dst :mir/length :mir/maximum :mir/op :mir/second-base :mir/second-length}, :mir/kernel-dot-f32 #{:mir/base :mir/count :mir/dst :mir/length :mir/maximum :mir/op :mir/second-base :mir/second-length}, :mir/kernel-load-u16 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op}, :mir/kernel-load-u32 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op}, :mir/kernel-load-u64 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op}, :mir/kernel-load-u8 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op}, :mir/kernel-store-u16 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/kernel-store-u32 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/kernel-store-u64 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/kernel-store-u8 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/kernel-subregion #{:mir/base :mir/dst :mir/length :mir/offset :mir/op :mir/size}, :mir/kernel-try-lock-u32 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op}, :mir/kernel-unlock-u32 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op}, :mir/kernel-xchg-u32 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/kernel-xchg-u64 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/label #{:mir/id :mir/op}, :mir/less-or-equal #{:mir/dst :mir/left :mir/op :mir/right}, :mir/less-than #{:mir/dst :mir/left :mir/op :mir/right}, :mir/move #{:mir/dst :mir/op :mir/src}, :mir/multiply #{:mir/dst :mir/left :mir/op :mir/right}, :mir/multiply-add #{:mir/addend :mir/dst :mir/left :mir/op :mir/right}, :mir/multiply-subtract #{:mir/addend :mir/dst :mir/left :mir/op :mir/right}, :mir/outgoing-argument #{:mir/index :mir/op :mir/src}, :mir/phi #{:mir/dst :mir/incomings :mir/op}, :mir/quotient #{:mir/dst :mir/left :mir/op :mir/right}, :mir/quotient-constant #{:mir/divisor :mir/dst :mir/left :mir/op}, :mir/recur #{:mir/arguments :mir/op}, :mir/reentry #{:mir/op :mir/parameters}, :mir/return #{:mir/op :mir/value}, :mir/rodata-address #{:mir/content :mir/dst :mir/op :mir/rodata-encoding}, :mir/runtime-call #{:mir/arguments :mir/context-offset :mir/dst :mir/op :mir/runtime}, :mir/shift-left #{:mir/dst :mir/left :mir/op :mir/right}, :mir/shift-right-signed #{:mir/dst :mir/left :mir/op :mir/right}, :mir/shift-right-unsigned #{:mir/dst :mir/left :mir/op :mir/right}, :mir/slice-load-u16 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op}, :mir/slice-load-u32 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op}, :mir/slice-load-u64 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op}, :mir/slice-load-u8 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op}, :mir/slice-store-u16 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/slice-store-u32 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/slice-store-u64 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/slice-store-u8 #{:mir/base :mir/dst :mir/index :mir/length :mir/maximum :mir/op :mir/stored}, :mir/spill-load #{:mir/dst :mir/op :mir/slot}, :mir/spill-store #{:mir/op :mir/slot :mir/src}, :mir/subtract #{:mir/dst :mir/left :mir/op :mir/right}, :mir/tail-call #{:mir/arguments :mir/callee :mir/op}, :mir/x86-privileged #{:mir/action :mir/arguments :mir/dst :mir/op}}"))
+   :default
+   (def instruction-keysets
+     {:mir/argument #{:mir/op :mir/dst :mir/index}
+      :mir/constant #{:mir/op :mir/dst :mir/value}
+      :mir/data-address #{:mir/op :mir/dst :mir/content}
+      ;; boot-lit: the address of a read-only literal placed in the code image
+      ;; (kotoba-gmir ADR-0011). Distinct from `:mir/data-address` above, which
+      ;; is a managed string the value runtime resolves against a runtime base.
+      :mir/rodata-address #{:mir/op :mir/dst :mir/content :mir/rodata-encoding}
+      ;; boot-scratch: the address of a function in the same module (kotoba-gmir
+      ;; ADR-0013). One destination, no sources, and a NAME -- the same shape as
+      ;; the literal above, with a symbol where that one has a string.
+      :mir/function-address #{:mir/op :mir/dst :mir/function}
+      :mir/add #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/subtract #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/multiply #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/multiply-add #{:mir/op :mir/dst :mir/left :mir/right :mir/addend}
+      :mir/multiply-subtract #{:mir/op :mir/dst :mir/left :mir/right :mir/addend}
+      :mir/quotient #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/quotient-constant #{:mir/op :mir/dst :mir/left :mir/divisor}
+      :mir/bit-and #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/bit-or #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/bit-xor #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/shift-left #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/shift-right-signed #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/shift-right-unsigned #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-add #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-subtract #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-multiply #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-divide #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-min #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-max #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-sqrt #{:mir/op :mir/dst :mir/input}
+      :mir/f64-equal #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-less-than #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-less-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-greater-than #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f64-unordered #{:mir/op :mir/dst :mir/left :mir/right}
+      ;; f32: binary32 (kotoba-lang ADR-kotoba-floating-point-on-native). Same
+      ;; operand shapes and the same one-word vreg as the f64 family above -- an
+      ;; f32 travels as its binary32 pattern sign-extended from bit 31.
+      ;;
+      ;; No f32-min/f32-max, and the absence is the decision: x86 MINSS/MAXSS
+      ;; return the SECOND operand when either input is NaN while AArch64 FMIN and
+      ;; the KIR oracle return the NaN, so :mir/f64-min above already means two
+      ;; things on the two targets. Recorded upstream, not inherited here.
+      :mir/f32-add #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f32-subtract #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f32-multiply #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f32-divide #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f32-sqrt #{:mir/op :mir/dst :mir/input}
+      :mir/f32-equal #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f32-less-than #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f32-less-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f32-greater-than #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f32-greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/f32-unordered #{:mir/op :mir/dst :mir/left :mir/right}
+      ;; Width conversions -- one source in, one value out, exactly like f32-sqrt.
+      :mir/f32-to-f64 #{:mir/op :mir/dst :mir/input}
+      :mir/f64-to-f32 #{:mir/op :mir/dst :mir/input}
+      :mir/i64-to-f32 #{:mir/op :mir/dst :mir/input}
+      :mir/i64-to-f64 #{:mir/op :mir/dst :mir/input}
+      :mir/kernel-load-u8 #{:mir/op :mir/dst :mir/base :mir/length
                             :mir/index :mir/maximum}
-   ;; sysops: the general atomic family (kotoba-gmir ADR 0007). The lock pair
-   ;; fixes its comparand and replacement; these take the word from the guest,
-   ;; which is what a device descriptor ring needs. `:mir/stored` is the
-   ;; addend for the adds and the replacement for the swaps and the
-   ;; compare-exchanges; `:mir/expected` exists only on the two
-   ;; compare-exchanges and is the comparand the lock withholds. `:mir/dst` is
-   ;; the word memory held BEFORE the operation, for all six.
-   :mir/kernel-atomic-add-u32 #{:mir/op :mir/dst :mir/base :mir/length
-                                :mir/index :mir/stored :mir/maximum}
-   :mir/kernel-atomic-add-u64 #{:mir/op :mir/dst :mir/base :mir/length
-                                :mir/index :mir/stored :mir/maximum}
-   :mir/kernel-xchg-u32 #{:mir/op :mir/dst :mir/base :mir/length
-                          :mir/index :mir/stored :mir/maximum}
-   :mir/kernel-xchg-u64 #{:mir/op :mir/dst :mir/base :mir/length
-                          :mir/index :mir/stored :mir/maximum}
-   :mir/kernel-cmpxchg-u32 #{:mir/op :mir/dst :mir/base :mir/length
-                             :mir/index :mir/expected :mir/stored :mir/maximum}
-   :mir/kernel-cmpxchg-u64 #{:mir/op :mir/dst :mir/base :mir/length
-                             :mir/index :mir/expected :mir/stored :mir/maximum}
-   ;; sysops: end
-   ;; simd: one dot product of two f32 regions (kotoba-gmir ADR 0010).
-   ;;
-   ;; The keyset is GMIR's, renamed. Two regions, so two bases and two
-   ;; lengths; `:mir/base`/`:mir/length` stay the FIRST region's names so
-   ;; anything reading `:mir/base` still finds a base. `:mir/count` counts
-   ;; ELEMENTS while the lengths count BYTES, and `:mir/maximum` is the byte
-   ;; ceiling on both, pinned to one value.
-   ;;
-   ;; It is deliberately NOT in `schedulable-integer-operations`: it reads
-   ;; memory, branches, and clobbers registers the scheduler does not model,
-   ;; so it stays a hard barrier like every other memory operation.
-   :mir/kernel-dot-f32 #{:mir/op :mir/dst :mir/base :mir/length
-                         :mir/second-base :mir/second-length
-                         :mir/count :mir/maximum}
-   ;; simd: end
-   ;; dequant: the fused dequantize-and-dot family. The f32 dot product's
-   ;; keyset exactly, because the operand SHAPE is the same one -- two
-   ;; regions, a ceiling and a count. What the count counts differs (blocks,
-   ;; not elements) and that is the format's business, not the keyset's.
-   :mir/kernel-dequant-dot-q8-0 #{:mir/op :mir/dst :mir/base :mir/length
-                                  :mir/second-base :mir/second-length
-                                  :mir/count :mir/maximum}
-   :mir/kernel-dequant-dot-q4-k #{:mir/op :mir/dst :mir/base :mir/length
-                                  :mir/second-base :mir/second-length
-                                  :mir/count :mir/maximum}
-   :mir/kernel-dequant-dot-q6-k #{:mir/op :mir/dst :mir/base :mir/length
-                                  :mir/second-base :mir/second-length
-                                  :mir/count :mir/maximum}
-   ;; dequant-iq: the four codebook formats (kotoba-gmir ADR 0027). Same
-   ;; keyset again: their codebook is read-only data the compiler places,
-   ;; not a region a caller passes, so no operand of theirs is new.
-   :mir/kernel-dequant-dot-iq4-xs #{:mir/op :mir/dst :mir/base :mir/length
-                                  :mir/second-base :mir/second-length
-                                  :mir/count :mir/maximum}
-   :mir/kernel-dequant-dot-iq2-s #{:mir/op :mir/dst :mir/base :mir/length
-                                 :mir/second-base :mir/second-length
-                                 :mir/count :mir/maximum}
-   :mir/kernel-dequant-dot-iq3-xxs #{:mir/op :mir/dst :mir/base :mir/length
-                                   :mir/second-base :mir/second-length
-                                   :mir/count :mir/maximum}
-   :mir/kernel-dequant-dot-iq3-s #{:mir/op :mir/dst :mir/base :mir/length
-                                 :mir/second-base :mir/second-length
-                                 :mir/count :mir/maximum}
-   ;; dequant: end
-   :mir/kernel-subregion #{:mir/op :mir/dst :mir/base :mir/length
-                           :mir/offset :mir/size}
-   :mir/equal #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/less-than #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/greater-than #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/less-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
-   :mir/spill-load #{:mir/op :mir/dst :mir/slot}
-   :mir/spill-store #{:mir/op :mir/src :mir/slot}
-   :mir/move #{:mir/op :mir/dst :mir/src}
-   ;; Stack-passed arguments (2026-09-23). A call passes its first five
-   ;; arguments in `call-argument-registers` and every one after that on the
-   ;; stack, at the bottom of the caller's frame: argument i (i >= 5) at
-   ;; [sp + 8(i - 5)]. The callee reads it from that INCOMING area, above its
-   ;; own frame; where that is depends on frame sizes only the encoder knows,
-   ;; so these name the argument by index, never by offset.
-   ;;
-   ;; They are introduced by `stack-argument-rewrite`, before allocation, and
-   ;; are ordinary instructions to the allocators: `incoming-load` defines a
-   ;; value, the two stores read one. All barriers to scheduling.
-   :mir/incoming-load #{:mir/op :mir/dst :mir/index}
-   :mir/outgoing-argument #{:mir/op :mir/src :mir/index}
-   ;; A tail call writes the callee's stack arguments into its OWN incoming
-   ;; area. Safe because every incoming argument was loaded at entry, before
-   ;; anything in the body could run.
-   :mir/incoming-argument-store #{:mir/op :mir/src :mir/index}
-   ;; Physical-only AArch64 self-tail re-entry. The boundary carries the
-   ;; allocator-owned parameter homes; recur edges have already performed the
-   ;; simultaneous assignment into exactly those registers.
-   :mir/reentry #{:mir/op :mir/parameters}
-   :mir/recur #{:mir/op :mir/arguments}
-   :mir/label #{:mir/op :mir/id}
-   :mir/branch-zero #{:mir/op :mir/test :mir/target}
-   :mir/branch-nonzero #{:mir/op :mir/test :mir/target}
-   :mir/jump #{:mir/op :mir/target}
-   :mir/phi #{:mir/op :mir/dst :mir/incomings}
-   :mir/call #{:mir/op :mir/dst :mir/callee :mir/arguments}
-   :mir/tail-call #{:mir/op :mir/callee :mir/arguments}
-   :mir/runtime-call #{:mir/op :mir/dst :mir/runtime :mir/context-offset
-                       :mir/arguments}
-   :mir/x86-privileged #{:mir/op :mir/dst :mir/action :mir/arguments}
-   :mir/capability-call #{:mir/op :mir/dst :mir/capability :mir/kind
-                          :mir/context-offset :mir/arguments}
-   :mir/return #{:mir/op :mir/value}})
+      :mir/kernel-store-u8 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/stored :mir/maximum}
+      :mir/kernel-load-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/maximum}
+      :mir/kernel-store-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                              :mir/index :mir/stored :mir/maximum}
+      ;; memwidth: the two remaining MMIO transfer widths, and the slice family.
+      ;; Every one carries exactly the fields its u8/u32 sibling does -- the width
+      ;; is in the operation name, and for the slice family the only other
+      ;; difference is that `:mir/index` counts elements rather than bytes.
+      :mir/kernel-load-u16 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/maximum}
+      :mir/kernel-store-u16 #{:mir/op :mir/dst :mir/base :mir/length
+                              :mir/index :mir/stored :mir/maximum}
+      :mir/kernel-load-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/maximum}
+      :mir/kernel-store-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                              :mir/index :mir/stored :mir/maximum}
+      :mir/slice-load-u8 #{:mir/op :mir/dst :mir/base :mir/length
+                           :mir/index :mir/maximum}
+      :mir/slice-store-u8 #{:mir/op :mir/dst :mir/base :mir/length
+                            :mir/index :mir/stored :mir/maximum}
+      :mir/slice-load-u16 #{:mir/op :mir/dst :mir/base :mir/length
+                            :mir/index :mir/maximum}
+      :mir/slice-store-u16 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/stored :mir/maximum}
+      :mir/slice-load-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                            :mir/index :mir/maximum}
+      :mir/slice-store-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/stored :mir/maximum}
+      :mir/slice-load-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                            :mir/index :mir/maximum}
+      :mir/slice-store-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/stored :mir/maximum}
+      ;; memwidth: end
+      ;; The lock pair carries the load's fields: three sources in, one value
+      ;; out. No `:mir/stored` -- the stored word is fixed by the operation, not
+      ;; supplied by the guest.
+      :mir/kernel-try-lock-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                                 :mir/index :mir/maximum}
+      :mir/kernel-unlock-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                               :mir/index :mir/maximum}
+      ;; sysops: the general atomic family (kotoba-gmir ADR 0007). The lock pair
+      ;; fixes its comparand and replacement; these take the word from the guest,
+      ;; which is what a device descriptor ring needs. `:mir/stored` is the
+      ;; addend for the adds and the replacement for the swaps and the
+      ;; compare-exchanges; `:mir/expected` exists only on the two
+      ;; compare-exchanges and is the comparand the lock withholds. `:mir/dst` is
+      ;; the word memory held BEFORE the operation, for all six.
+      :mir/kernel-atomic-add-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                                   :mir/index :mir/stored :mir/maximum}
+      :mir/kernel-atomic-add-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                                   :mir/index :mir/stored :mir/maximum}
+      :mir/kernel-xchg-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/stored :mir/maximum}
+      :mir/kernel-xchg-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                             :mir/index :mir/stored :mir/maximum}
+      :mir/kernel-cmpxchg-u32 #{:mir/op :mir/dst :mir/base :mir/length
+                                :mir/index :mir/expected :mir/stored :mir/maximum}
+      :mir/kernel-cmpxchg-u64 #{:mir/op :mir/dst :mir/base :mir/length
+                                :mir/index :mir/expected :mir/stored :mir/maximum}
+      ;; sysops: end
+      ;; simd: one dot product of two f32 regions (kotoba-gmir ADR 0010).
+      ;;
+      ;; The keyset is GMIR's, renamed. Two regions, so two bases and two
+      ;; lengths; `:mir/base`/`:mir/length` stay the FIRST region's names so
+      ;; anything reading `:mir/base` still finds a base. `:mir/count` counts
+      ;; ELEMENTS while the lengths count BYTES, and `:mir/maximum` is the byte
+      ;; ceiling on both, pinned to one value.
+      ;;
+      ;; It is deliberately NOT in `schedulable-integer-operations`: it reads
+      ;; memory, branches, and clobbers registers the scheduler does not model,
+      ;; so it stays a hard barrier like every other memory operation.
+      :mir/kernel-dot-f32 #{:mir/op :mir/dst :mir/base :mir/length
+                            :mir/second-base :mir/second-length
+                            :mir/count :mir/maximum}
+      ;; simd: end
+      ;; dequant: the fused dequantize-and-dot family. The f32 dot product's
+      ;; keyset exactly, because the operand SHAPE is the same one -- two
+      ;; regions, a ceiling and a count. What the count counts differs (blocks,
+      ;; not elements) and that is the format's business, not the keyset's.
+      :mir/kernel-dequant-dot-q8-0 #{:mir/op :mir/dst :mir/base :mir/length
+                                     :mir/second-base :mir/second-length
+                                     :mir/count :mir/maximum}
+      :mir/kernel-dequant-dot-q4-k #{:mir/op :mir/dst :mir/base :mir/length
+                                     :mir/second-base :mir/second-length
+                                     :mir/count :mir/maximum}
+      :mir/kernel-dequant-dot-q6-k #{:mir/op :mir/dst :mir/base :mir/length
+                                     :mir/second-base :mir/second-length
+                                     :mir/count :mir/maximum}
+      ;; dequant-iq: the four codebook formats (kotoba-gmir ADR 0027). Same
+      ;; keyset again: their codebook is read-only data the compiler places,
+      ;; not a region a caller passes, so no operand of theirs is new.
+      :mir/kernel-dequant-dot-iq4-xs #{:mir/op :mir/dst :mir/base :mir/length
+                                     :mir/second-base :mir/second-length
+                                     :mir/count :mir/maximum}
+      :mir/kernel-dequant-dot-iq2-s #{:mir/op :mir/dst :mir/base :mir/length
+                                    :mir/second-base :mir/second-length
+                                    :mir/count :mir/maximum}
+      :mir/kernel-dequant-dot-iq3-xxs #{:mir/op :mir/dst :mir/base :mir/length
+                                      :mir/second-base :mir/second-length
+                                      :mir/count :mir/maximum}
+      :mir/kernel-dequant-dot-iq3-s #{:mir/op :mir/dst :mir/base :mir/length
+                                    :mir/second-base :mir/second-length
+                                    :mir/count :mir/maximum}
+      ;; dequant: end
+      :mir/kernel-subregion #{:mir/op :mir/dst :mir/base :mir/length
+                              :mir/offset :mir/size}
+      :mir/equal #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/less-than #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/greater-than #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/less-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/greater-or-equal #{:mir/op :mir/dst :mir/left :mir/right}
+      :mir/spill-load #{:mir/op :mir/dst :mir/slot}
+      :mir/spill-store #{:mir/op :mir/src :mir/slot}
+      :mir/move #{:mir/op :mir/dst :mir/src}
+      ;; Stack-passed arguments (2026-09-23). A call passes its first five
+      ;; arguments in `call-argument-registers` and every one after that on the
+      ;; stack, at the bottom of the caller's frame: argument i (i >= 5) at
+      ;; [sp + 8(i - 5)]. The callee reads it from that INCOMING area, above its
+      ;; own frame; where that is depends on frame sizes only the encoder knows,
+      ;; so these name the argument by index, never by offset.
+      ;;
+      ;; They are introduced by `stack-argument-rewrite`, before allocation, and
+      ;; are ordinary instructions to the allocators: `incoming-load` defines a
+      ;; value, the two stores read one. All barriers to scheduling.
+      :mir/incoming-load #{:mir/op :mir/dst :mir/index}
+      :mir/outgoing-argument #{:mir/op :mir/src :mir/index}
+      ;; A tail call writes the callee's stack arguments into its OWN incoming
+      ;; area. Safe because every incoming argument was loaded at entry, before
+      ;; anything in the body could run.
+      :mir/incoming-argument-store #{:mir/op :mir/src :mir/index}
+      ;; Physical-only AArch64 self-tail re-entry. The boundary carries the
+      ;; allocator-owned parameter homes; recur edges have already performed the
+      ;; simultaneous assignment into exactly those registers.
+      :mir/reentry #{:mir/op :mir/parameters}
+      :mir/recur #{:mir/op :mir/arguments}
+      :mir/label #{:mir/op :mir/id}
+      :mir/branch-zero #{:mir/op :mir/test :mir/target}
+      :mir/branch-nonzero #{:mir/op :mir/test :mir/target}
+      :mir/jump #{:mir/op :mir/target}
+      :mir/phi #{:mir/op :mir/dst :mir/incomings}
+      :mir/call #{:mir/op :mir/dst :mir/callee :mir/arguments}
+      :mir/tail-call #{:mir/op :mir/callee :mir/arguments}
+      :mir/runtime-call #{:mir/op :mir/dst :mir/runtime :mir/context-offset
+                          :mir/arguments}
+      :mir/x86-privileged #{:mir/op :mir/dst :mir/action :mir/arguments}
+      :mir/capability-call #{:mir/op :mir/dst :mir/capability :mir/kind
+                             :mir/context-offset :mir/arguments}
+      :mir/return #{:mir/op :mir/value}}))
 
 
 ;; memwidth: the checked-memory families, as data rather than as a set spelled
@@ -491,23 +502,51 @@
            (concat kernel-window-operations slice-operations kernel-atomic-ops))))
 ;; memwidth: end
 
-(def ^:private v1-operations
-  (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call
-        :mir/quotient-constant :mir/branch-nonzero :mir/reentry :mir/recur))
+#?(:kotoba
+   (defn instruction-known-op? [op :keyword] :bool
+     (form/form-has? (instruction-keysets) (form/keyword-form op))))
 
-(def ^:private v2-operations
-  (disj (set (keys instruction-keysets)) :mir/call :mir/tail-call
-        :mir/quotient-constant :mir/branch-nonzero :mir/reentry :mir/recur))
+#?(:kotoba
+   (defn instruction-keyset-of [op :keyword] [:ref :form/r]
+     (form/form-get (instruction-keysets) (form/keyword-form op))))
 
-(def ^:private v3-operations
-  (set (keys instruction-keysets)))
+#?(:kotoba
+   (defn instruction-keyset-is? [op :keyword keys [:ref :form/r]] :bool
+     (and (instruction-known-op? op)
+          (form/eq (instruction-keyset-of op) keys))))
 
-(defn- operations-for [program-version]
-  (case program-version
-    1 v1-operations
-    2 v2-operations
-    3 v3-operations
-    #{}))
+#?(:kotoba
+   (defn- v2-excluded? [op :keyword] :bool
+     (or (= op :mir/call) (= op :mir/tail-call) (= op :mir/quotient-constant)
+         (= op :mir/branch-nonzero) (= op :mir/reentry) (= op :mir/recur))))
+
+#?(:kotoba
+   (defn- operation-allowed? [program-version :i64 op :keyword] :bool
+     (and (instruction-known-op? op)
+          (cond
+            (= program-version 1) (and (not (= op :mir/phi)) (not (v2-excluded? op)))
+            (= program-version 2) (not (v2-excluded? op))
+            (= program-version 3) true
+            :else false))))
+
+#?(:default
+   (do (def ^:private v1-operations
+     (disj (set (keys instruction-keysets)) :mir/phi :mir/call :mir/tail-call
+           :mir/quotient-constant :mir/branch-nonzero :mir/reentry :mir/recur))
+   
+   (def ^:private v2-operations
+     (disj (set (keys instruction-keysets)) :mir/call :mir/tail-call
+           :mir/quotient-constant :mir/branch-nonzero :mir/reentry :mir/recur))
+   
+   (def ^:private v3-operations
+     (set (keys instruction-keysets)))
+   
+   (defn- operations-for [program-version]
+     (case program-version
+       1 v1-operations
+       2 v2-operations
+       3 v3-operations
+       #{}))))
 
 (defn- physical-register? [target value]
   ;; Physical registers are namespaced keywords. Guard that closed type before
@@ -552,9 +591,11 @@
                     #(physical-register? target %))]
     (doseq [instruction instructions]
       (let [op (:mir/op instruction)
-            allowed (operations-for version)]
-        (when-not (and (contains? allowed op)
-                       (= (get instruction-keysets op) (set (keys instruction))))
+            #?@(:kotoba [] :default [allowed (operations-for version)])]
+        (when-not (and #?(:kotoba (operation-allowed? version op)
+                          :default (contains? allowed op))
+                       #?(:kotoba (instruction-keyset-is? op (form/keys-of instruction))
+                          :default (= (get instruction-keysets op) (set (keys instruction)))))
           (reject! :non-canonical-instruction instruction))
         (when (and (= :virtual registers)
                    (contains? #{:mir/spill-load :mir/spill-store :mir/move} op))
