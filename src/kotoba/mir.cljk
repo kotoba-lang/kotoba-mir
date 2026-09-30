@@ -436,30 +436,59 @@
 ;; sysops: the MIR names of the general atomic family, derived from GMIR's own
 ;; set so the two cannot drift. `kotoba.mir` renames `:gmir/x` to `:mir/x`
 ;; wholesale, so deriving is exact rather than a transcription.
-(def kernel-atomic-ops
-  (into #{} (map #(keyword "mir" (name %))) gmir/kernel-atomic-ops))
+#?(:kotoba
+   (def kernel-atomic-ops
+     #{:mir/kernel-atomic-add-u32 :mir/kernel-atomic-add-u64 :mir/kernel-xchg-u32
+       :mir/kernel-xchg-u64 :mir/kernel-cmpxchg-u32 :mir/kernel-cmpxchg-u64})
+   :default
+   (def kernel-atomic-ops
+     (into #{} (map #(keyword "mir" (name %))) gmir/kernel-atomic-ops)))
 ;; sysops: end
 
 ;; simd: the f32 dot product's byte ceiling, taken from GMIR's own var rather
 ;; than transcribed, so the two cannot drift the way `slice-item-limit` has to
 ;; be asserted equal by a test.
-(def kernel-dot-f32-maximum gmir/kernel-dot-f32-maximum)
+#?(:kotoba
+   (def kernel-dot-f32-maximum 65536)
+   :default
+   (def kernel-dot-f32-maximum gmir/kernel-dot-f32-maximum))
 ;; simd: end
 
 ;; dequant: the fused family's operations and ceiling, taken from GMIR's own
 ;; vars rather than transcribed.
-(def kernel-dequant-dot-operations
-  (into #{} (map #(keyword "mir" (name %))) gmir/kernel-dequant-dot-operations))
+#?(:kotoba
+   (def kernel-dequant-dot-operations
+     #{:mir/kernel-dequant-dot-q8-0 :mir/kernel-dequant-dot-q4-k :mir/kernel-dequant-dot-q6-k
+       :mir/kernel-dequant-dot-iq4-xs :mir/kernel-dequant-dot-iq2-s :mir/kernel-dequant-dot-iq3-xxs
+       :mir/kernel-dequant-dot-iq3-s})
+   :default
+   (def kernel-dequant-dot-operations
+     (into #{} (map #(keyword "mir" (name %))) gmir/kernel-dequant-dot-operations)))
 
-(def kernel-dequant-dot-maximum gmir/kernel-dequant-dot-maximum)
+#?(:kotoba
+   (def kernel-dequant-dot-maximum 65536)
+   :default
+   (def kernel-dequant-dot-maximum gmir/kernel-dequant-dot-maximum))
 ;; dequant: end
 
 ;; memwidth: every operation that carries a `:mir/index` operand -- the two
 ;; windowed families, the slice family, the lock pair, and (merged from the
 ;; sysops branch) the general atomics.
-(def ^:private indexed-memory-operations
-  (into #{:mir/kernel-try-lock-u32 :mir/kernel-unlock-u32}
-        (concat kernel-window-operations slice-operations kernel-atomic-ops)))
+#?(:kotoba
+   ;; A constant is a literal on this route (a `def` value may not call a
+   ;; function), so the union of the four families above is spelled out.
+   (def ^:private indexed-memory-operations
+     #{:mir/kernel-try-lock-u32 :mir/kernel-unlock-u32
+       :mir/kernel-load-u8 :mir/kernel-store-u8 :mir/kernel-load-u16 :mir/kernel-store-u16
+       :mir/kernel-load-u32 :mir/kernel-store-u32 :mir/kernel-load-u64 :mir/kernel-store-u64
+       :mir/slice-load-u8 :mir/slice-store-u8 :mir/slice-load-u16 :mir/slice-store-u16
+       :mir/slice-load-u32 :mir/slice-store-u32 :mir/slice-load-u64 :mir/slice-store-u64
+       :mir/kernel-atomic-add-u32 :mir/kernel-atomic-add-u64 :mir/kernel-xchg-u32
+       :mir/kernel-xchg-u64 :mir/kernel-cmpxchg-u32 :mir/kernel-cmpxchg-u64})
+   :default
+   (def ^:private indexed-memory-operations
+     (into #{:mir/kernel-try-lock-u32 :mir/kernel-unlock-u32}
+           (concat kernel-window-operations slice-operations kernel-atomic-ops))))
 ;; memwidth: end
 
 (def ^:private v1-operations
