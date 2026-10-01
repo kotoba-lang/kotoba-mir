@@ -28,11 +28,10 @@ twin in the same `#?(:kotoba ... :default ...)` form (`#?(:kotoba nil :default
   instruction.
 * **Refusals are data first.** The host throws at the first problem; the twin
   computes it (`validate-problem`, `select-target-result`,
-  `allocate-registers-result`) and the public function (`validate!`,
+  `allocate-registers-result`, `counted-self-recur-plans-result`) and the public function (`validate!`,
   `select-target`, `allocate-registers`) aborts with the same keyword. Checks
   run in the host's order, so the problem named is the host's problem.
-  The host gains `validate-problem`, `select-target-result` and
-  `allocate-registers-result` with the same shape, so the two routes can be
+  The host gains the same four with the same shape, so the two routes can be
   compared on identical programs.
 * **`try/catch :spill-required` becomes a state flag.** The linear scan
   (`allocate-without-spills`) carries one state map; a step that would throw
@@ -52,12 +51,28 @@ twin in the same `#?(:kotoba ... :default ...)` form (`#?(:kotoba nil :default
 ## Consequences
 
 * `amu check src/kotoba/mir.cljk` admits the module. The margin is narrow by
-  construction: the linked project (mir + gmir + form) is 1013 functions
-  against the 1024-function admission limit of `kotoba.compiler.project`, so
-  a dependency growing by a dozen functions needs either a smaller `mir` or a
-  higher limit.
+  construction: the linked project (mir + gmir + form) is 1008 functions
+  against the 1024-function admission limit of `kotoba.compiler.project`
+  (`kotoba.codegen.mc`, which links mir, is 1018), so a dependency growing by
+  a dozen functions needs either a smaller `mir` or a higher limit. Small
+  single-use helpers were inlined, and long `or` chains are chunked, to stay
+  under it.
 * The host route is unchanged: the full `kotoba.mir-test` suite gives the same
-  result before and after.
+  result before and after (118 tests, 2139 assertions, the same single
+  pre-existing error), plus one test for the problem-as-data entry points.
 * Callers that hold host maps (`kotoba.native.machine-ir`) keep calling the
   same names with the same arities; they become Kotoba-admissible when they
   hold Forms, which is their own port.
+
+## Verification
+
+The Kotoba twin was run through the KIR interpreter against the host on every
+call the `kotoba.mir-test` suite makes (captured with `alter-var-root`,
+excluding the calls made under `with-redefs` of the register tiers, which the
+Kotoba route cannot express): `validate!` 440 distinct programs, `select-target`
+292, `allocate-registers` 245 of 247 (two 49 KB wide-call modules exceed the
+module string-literal limit of the probe, not of mir), plus 44 randomly
+generated flat and v3 programs, `saved-registers`, `allocator-pool` and
+`counted-self-recur-plans`, and the 136 valid programs of `kotoba.codegen.mc-test`.
+Results are compared structurally (map key order is not significant) and
+refusals by problem keyword; there are no mismatches.
