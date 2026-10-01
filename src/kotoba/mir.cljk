@@ -268,7 +268,7 @@
    :string-from-utf8 352 :bytes-from-vector 360 :bytes-slice 368 :bytes-concat 376}))
 
 #?(:kotoba
-   (defn capability-argument-registers [] [:ref :form/r] (form/edn-form "{:x86-64 {:i64 [:x86-64/rdx] :string [:x86-64/r8] :option-i64 [:x86-64/r8] :result-i64 [:x86-64/r8] :clock-v1 [:x86-64/r8] :dataspace-v1 [:x86-64/r8] :ui-commit-v1 [:x86-64/r8] :ui-event-v1 [:x86-64/r8]} :aarch64 {:i64 [:aarch64/x2] :string [:aarch64/x4] :option-i64 [:aarch64/x4] :result-i64 [:aarch64/x4] :clock-v1 [:aarch64/x4] :dataspace-v1 [:aarch64/x4] :ui-commit-v1 [:aarch64/x4] :ui-event-v1 [:aarch64/x4]}}"))
+   (defn capability-argument-registers [] [:ref :form/r] (form/edn-form "{:x86-64 {:i64 [:x86-64/rdx] :string [:x86-64/r8] :option-i64 [:x86-64/r8] :result-i64 [:x86-64/r8] :clock-v1 [:x86-64/r8] :dataspace-v1 [:x86-64/r8] :ui-commit-v1 [:x86-64/r8] :ui-event-v1 [:x86-64/r8] :bytes-v1 [:x86-64/r8] :string-bytes-v1 [:x86-64/r8]} :aarch64 {:i64 [:aarch64/x2] :string [:aarch64/x4] :option-i64 [:aarch64/x4] :result-i64 [:aarch64/x4] :clock-v1 [:aarch64/x4] :dataspace-v1 [:aarch64/x4] :ui-commit-v1 [:aarch64/x4] :ui-event-v1 [:aarch64/x4] :bytes-v1 [:aarch64/x4] :string-bytes-v1 [:aarch64/x4]}}"))
    :default
 (def capability-argument-registers
   {:x86-64 {:i64 [:x86-64/rdx]
@@ -278,7 +278,9 @@
             :clock-v1 [:x86-64/r8]
             :dataspace-v1 [:x86-64/r8]
             :ui-commit-v1 [:x86-64/r8]
-            :ui-event-v1 [:x86-64/r8]}
+            :ui-event-v1 [:x86-64/r8]
+            :bytes-v1 [:x86-64/r8]
+            :string-bytes-v1 [:x86-64/r8]}
    :aarch64 {:i64 [:aarch64/x2]
             :string [:aarch64/x4]
             :option-i64 [:aarch64/x4]
@@ -286,14 +288,17 @@
             :clock-v1 [:aarch64/x4]
             :dataspace-v1 [:aarch64/x4]
             :ui-commit-v1 [:aarch64/x4]
-            :ui-event-v1 [:aarch64/x4]}}))
+            :ui-event-v1 [:aarch64/x4]
+            :bytes-v1 [:aarch64/x4]
+            :string-bytes-v1 [:aarch64/x4]}}))
 
 #?(:kotoba
-   (defn capability-context-offsets [] [:ref :form/r] (form/edn-form "{:i64 48 :string 128 :option-i64 128 :result-i64 128 :clock-v1 128 :dataspace-v1 128 :ui-commit-v1 128 :ui-event-v1 128}"))
+   (defn capability-context-offsets [] [:ref :form/r] (form/edn-form "{:i64 48 :string 128 :option-i64 128 :result-i64 128 :clock-v1 128 :dataspace-v1 128 :ui-commit-v1 128 :ui-event-v1 128 :bytes-v1 128 :string-bytes-v1 128}"))
    :default
 (def capability-context-offsets
   {:i64 48 :string 128 :option-i64 128 :result-i64 128 :clock-v1 128
-   :dataspace-v1 128 :ui-commit-v1 128 :ui-event-v1 128}))
+   :dataspace-v1 128 :ui-commit-v1 128 :ui-event-v1 128
+   :bytes-v1 128 :string-bytes-v1 128}))
 
 #?(:kotoba
    (defn return-registers [] [:ref :form/r] (form/edn-form "{:x86-64 :x86-64/rax :aarch64 :aarch64/x0}"))
