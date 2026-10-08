@@ -3321,7 +3321,9 @@
                    (= :mir/subtract (:mir/op decrement))
                    (= counter (:mir/left decrement))
                    (= :mir/constant (:mir/op one))
-                   (= 1 (:mir/value one))
+                   ;; host-number: a literal from the reader is a BigInt on ClojureScript, and (= 1 1n) is
+                   ;; false there, so without it nbb silently refused every source-written countdown
+                   (= 1 (host-number (:mir/value one)))
                    (every? (fn [instruction]
                              (or (contains? structural-ops (:mir/op instruction))
                                  (bulk-fuel-pure-instruction? instruction)
