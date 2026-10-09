@@ -18,7 +18,10 @@
          ;; Advanced 2026-09-30, 47763164 -> 6c3651f9 (kotoba-gmir main, forward
          ;; only): the :fuel-charge arity the fuel-word offset 8 selects (amu
          ;; ADR 0353 floor :allocation-budget-native).
-         :git/sha "6c3651f953eb255d9ca1f45622cd904f69499c83"}}
+         ;; Advanced 2026-10-09, 6c3651f9 -> 54ac95b7 (kotoba-gmir main, ahead 2,
+         ;; forward only): the :gas-charge arity the gas-word offset 384 selects
+         ;; (superproject adr-2610092340 D12).
+         :git/sha "54ac95b7aff5c8d3b4e69525048969a422fe0d82"}}
  :aliases {:test {:extra-paths ["test"]
                   :extra-deps {io.github.cognitect-labs/test-runner
                                {:git/url "https://github.com/cognitect-labs/test-runner.git"

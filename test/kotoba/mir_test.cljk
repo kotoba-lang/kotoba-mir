@@ -2145,6 +2145,33 @@
                                       instructions)))))
             target)))))
 
+;; superproject adr-2610092340 D12: the consensus gas debit addresses the
+;; context's gas word (ABI v12), which neither a host slot nor the fuel word
+;; shares; moved onto the fuel word it is refused.
+(deftest the-gas-charge-addresses-the-gas-word
+  (let [program {:gmir/version 1
+                 :gmir/instructions
+                 [{:gmir/op :gmir/runtime-call :gmir/dst v0
+                   :gmir/runtime :gas-charge :gmir/arguments []}
+                  {:gmir/op :gmir/return :gmir/value v0}]}]
+    (is (= 384 (:gas-charge mir/runtime-context-offsets)))
+    (is (not-any? #{384} (vals (dissoc mir/runtime-context-offsets :gas-charge))))
+    (doseq [target mir/targets]
+      (let [selected (mir/select-target target program)
+            call (first (filter #(= :mir/runtime-call (:mir/op %))
+                                (:mir/instructions selected)))]
+        (is (= 384 (:mir/context-offset call)) target)
+        (is (some? (mir/validate! (mir/allocate-registers selected))) target)
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (mir/validate!
+                      (update selected :mir/instructions
+                              (fn [instructions]
+                                (mapv #(if (= :mir/runtime-call (:mir/op %))
+                                         (assoc % :mir/context-offset 8)
+                                         %)
+                                      instructions)))))
+            target)))))
+
 (deftest the-in-place-store-does-not-share-the-copying-slot
   (is (not= (:vector-assoc mir/runtime-context-offsets)
             (:vector-assoc-in-place mir/runtime-context-offsets)))
