@@ -156,7 +156,13 @@
    ;; (context v2 onward), the one the entry prefix already decrements, and
    ;; kotoba-native encodes the call inline as that same decrement. No host
    ;; is asked anything, so no context version moves.
-   :fuel-charge 8})
+   :fuel-charge 8
+   ;; Consensus gas (superproject adr-2610092340 D12, 2026-10-09): the
+   ;; per-form gas debit. Not a slot either -- 384 is the context's GAS word,
+   ;; appended after v11's last slot (376), so the context version moves to
+   ;; 12: a v11 host has nothing at 384. kotoba-native encodes the call
+   ;; inline as a decrement of that word; nothing calls through it.
+   :gas-charge 384})
 
 (def capability-argument-registers
   {:x86-64 {:i64 [:x86-64/rdx]
