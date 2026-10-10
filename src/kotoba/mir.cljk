@@ -8,12 +8,20 @@
             [kotoba.gmir :as gmir]))
 
 #?(:kotoba
-   (defn- fget [m [:ref :form/r] k :keyword] [:ref :form/r]
-     (form/form-get m (form/keyword-form k))))
+   ;; keyword-keyed lookups scan the kids without building a key Form (as kotoba.native.machine-ir's kslot)
+   (defn- kslot [m [:ref :form/r] k :keyword] :i64
+     (let [xs (form/kids-of m) n (vector-count xs)]
+       (loop [j 0]
+         (if (>= (+ j 1) n) -1
+           (let [x (typed-list-nth [:list [:ref :form/r]] xs j)]
+             (if (and (form/is-keyword? x) (= (form/keyword-value x) k)) j (recur (+ j 2)))))))))
 
 #?(:kotoba
-   (defn- fhas? [m [:ref :form/r] k :keyword] :bool
-     (form/form-has? m (form/keyword-form k))))
+   (defn- fget [m [:ref :form/r] k :keyword] [:ref :form/r]
+     (let [j (kslot m k)] (if (< j 0) (form/nil-form) (typed-list-nth [:list [:ref :form/r]] (form/kids-of m) (+ j 1))))))
+
+#?(:kotoba
+   (defn- fhas? [m [:ref :form/r] k :keyword] :bool (>= (kslot m k) 0)))
 
 #?(:kotoba
    (defn- kw-of [f [:ref :form/r]] :keyword
@@ -883,7 +891,8 @@
 
 #?(:kotoba
    (defn- kassoc [m [:ref :form/r] k :keyword v [:ref :form/r]] [:ref :form/r]
-     (form/assoc-form m (form/keyword-form k) v)))
+     (let [j (kslot m k)]
+       (form/assoc-form m (if (< j 0) (form/keyword-form k) (typed-list-nth [:list [:ref :form/r]] (form/kids-of m) j)) v))))
 
 #?(:kotoba
    (defn- mkeys [m [:ref :form/r]] [:ref :form/r]
