@@ -2151,8 +2151,10 @@
 (deftest the-gas-charge-addresses-the-gas-word
   (let [program {:gmir/version 1
                  :gmir/instructions
-                 [{:gmir/op :gmir/runtime-call :gmir/dst v0
-                   :gmir/runtime :gas-charge :gmir/arguments []}
+                 ;; one argument since 2026-10-10: the form's weight
+                 [{:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 5}
+                  {:gmir/op :gmir/runtime-call :gmir/dst v0
+                   :gmir/runtime :gas-charge :gmir/arguments [v1]}
                   {:gmir/op :gmir/return :gmir/value v0}]}]
     (is (= 384 (:gas-charge mir/runtime-context-offsets)))
     (is (not-any? #{384} (vals (dissoc mir/runtime-context-offsets :gas-charge))))

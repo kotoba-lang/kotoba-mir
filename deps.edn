@@ -21,7 +21,9 @@
          ;; Advanced 2026-10-09, 6c3651f9 -> 54ac95b7 (kotoba-gmir main, ahead 2,
          ;; forward only): the :gas-charge arity the gas-word offset 384 selects
          ;; (superproject adr-2610092340 D12).
-         :git/sha "54ac95b7aff5c8d3b4e69525048969a422fe0d82"}}
+         ;; Advanced 2026-10-10, 54ac95b7 -> a891d432 (kotoba-gmir main, behind 0):
+         ;; :gas-charge takes the form's weight (arity 1, kotoba-gmir#40).
+         :git/sha "a891d4328132058d31756935a8a1d51630526fcc"}}
  :aliases {:test {:extra-paths ["test"]
                   :extra-deps {io.github.cognitect-labs/test-runner
                                {:git/url "https://github.com/cognitect-labs/test-runner.git"
