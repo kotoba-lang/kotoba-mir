@@ -2118,6 +2118,62 @@
         (is (= 280 (:mir/context-offset call)) target)
         (is (some? (mir/validate! allocated)) target)))))
 
+;; amu ADR 0353 floor :allocation-budget-native: the per-constructor fuel
+;; debit addresses the context's fuel word, which no host slot shares; moved
+;; onto a slot it is refused.
+(deftest the-fuel-charge-addresses-the-fuel-word
+  (let [program {:gmir/version 1
+                 :gmir/instructions
+                 [{:gmir/op :gmir/runtime-call :gmir/dst v0
+                   :gmir/runtime :fuel-charge :gmir/arguments []}
+                  {:gmir/op :gmir/return :gmir/value v0}]}]
+    (is (= 8 (:fuel-charge mir/runtime-context-offsets)))
+    (is (not-any? #{8} (vals (dissoc mir/runtime-context-offsets :fuel-charge))))
+    (doseq [target mir/targets]
+      (let [selected (mir/select-target target program)
+            call (first (filter #(= :mir/runtime-call (:mir/op %))
+                                (:mir/instructions selected)))]
+        (is (= 8 (:mir/context-offset call)) target)
+        (is (some? (mir/validate! (mir/allocate-registers selected))) target)
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (mir/validate!
+                      (update selected :mir/instructions
+                              (fn [instructions]
+                                (mapv #(if (= :mir/runtime-call (:mir/op %))
+                                         (assoc % :mir/context-offset 56)
+                                         %)
+                                      instructions)))))
+            target)))))
+
+;; superproject adr-2610092340 D12: the consensus gas debit addresses the
+;; context's gas word (ABI v12), which neither a host slot nor the fuel word
+;; shares; moved onto the fuel word it is refused.
+(deftest the-gas-charge-addresses-the-gas-word
+  (let [program {:gmir/version 1
+                 :gmir/instructions
+                 ;; one argument since 2026-10-10: the form's weight
+                 [{:gmir/op :gmir/constant :gmir/dst v1 :gmir/value 5}
+                  {:gmir/op :gmir/runtime-call :gmir/dst v0
+                   :gmir/runtime :gas-charge :gmir/arguments [v1]}
+                  {:gmir/op :gmir/return :gmir/value v0}]}]
+    (is (= 384 (:gas-charge mir/runtime-context-offsets)))
+    (is (not-any? #{384} (vals (dissoc mir/runtime-context-offsets :gas-charge))))
+    (doseq [target mir/targets]
+      (let [selected (mir/select-target target program)
+            call (first (filter #(= :mir/runtime-call (:mir/op %))
+                                (:mir/instructions selected)))]
+        (is (= 384 (:mir/context-offset call)) target)
+        (is (some? (mir/validate! (mir/allocate-registers selected))) target)
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (mir/validate!
+                      (update selected :mir/instructions
+                              (fn [instructions]
+                                (mapv #(if (= :mir/runtime-call (:mir/op %))
+                                         (assoc % :mir/context-offset 8)
+                                         %)
+                                      instructions)))))
+            target)))))
+
 (deftest the-in-place-store-does-not-share-the-copying-slot
   (is (not= (:vector-assoc mir/runtime-context-offsets)
             (:vector-assoc-in-place mir/runtime-context-offsets)))
@@ -2848,8 +2904,8 @@
 
 (defn- counted-function
   ([] (counted-function {}))
-  ([{:keys [body-extra tail-counter branch-op tail-name]
-     :or {body-extra [] branch-op :mir/branch-nonzero tail-name 'counted}}]
+  ([{:keys [body-extra tail-counter branch-op tail-name one-value]
+     :or {body-extra [] branch-op :mir/branch-nonzero tail-name 'counted one-value 1}}]
    (let [[counter state zero one next-counter next-state]
          (map gmir/vreg (range 6))]
      {:mir/name 'counted
@@ -2862,7 +2918,7 @@
              {:mir/op :mir/return :mir/value state}
              {:mir/op :mir/label :mir/id :test/body}]
             body-extra
-            [{:mir/op :mir/constant :mir/dst one :mir/value 1}
+            [{:mir/op :mir/constant :mir/dst one :mir/value one-value}
              {:mir/op :mir/subtract :mir/dst next-counter
               :mir/left counter :mir/right one}
              {:mir/op :mir/add :mir/dst next-state
@@ -2875,6 +2931,12 @@
           :runtime-domain :nonnegative-i64
           :charge :entry-plus-exact-self-recur-count}
          (mir/counted-self-recur-plan (counted-function))))
+  (testing "a decrement literal from the reader (a BigInt on ClojureScript) is the same countdown"
+    (is (= {:counter-parameter 0
+            :runtime-domain :nonnegative-i64
+            :charge :entry-plus-exact-self-recur-count}
+           (mir/counted-self-recur-plan
+            (counted-function {:one-value #?(:cljs (js/BigInt 1) :default 1)})))))
   (testing "negative counters remain a runtime fallback, never a wrapped plan"
     (is (= :nonnegative-i64
            (:runtime-domain (mir/counted-self-recur-plan (counted-function))))))

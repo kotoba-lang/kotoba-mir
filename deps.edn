@@ -15,7 +15,15 @@
          ;; Advanced 2026-09-25, cf39f7c1 -> 47763164 (kotoba-gmir main, ahead 4,
          ;; forward only): the four ABI v11 runtime arities this repository's
          ;; offsets 352-376 select (superproject adr-2609242330).
-         :git/sha "47763164ceec7be14d67fc35ef619f71d383eab9"}}
+         ;; Advanced 2026-09-30, 47763164 -> 6c3651f9 (kotoba-gmir main, forward
+         ;; only): the :fuel-charge arity the fuel-word offset 8 selects (amu
+         ;; ADR 0353 floor :allocation-budget-native).
+         ;; Advanced 2026-10-09, 6c3651f9 -> 54ac95b7 (kotoba-gmir main, ahead 2,
+         ;; forward only): the :gas-charge arity the gas-word offset 384 selects
+         ;; (superproject adr-2610092340 D12).
+         ;; Advanced 2026-10-10, 54ac95b7 -> a891d432 (kotoba-gmir main, behind 0):
+         ;; :gas-charge takes the form's weight (arity 1, kotoba-gmir#40).
+         :git/sha "a891d4328132058d31756935a8a1d51630526fcc"}}
  :aliases {:test {:extra-paths ["test"]
                   :extra-deps {io.github.cognitect-labs/test-runner
                                {:git/url "https://github.com/cognitect-labs/test-runner.git"
