@@ -3,7 +3,7 @@
 ;; Native compilation, invariants under execution and resource costs are open.
 (ns kotoba.mir.table
   {:kotoba/export [empty nil-key index-key keyword-key symbol-key compare-key scalar members-value data members
-                  count height get put value-at valid?]}
+                  count height get put remove key-at value-at valid?]}
   (:require [kotoba.gmir.node :as node])
   (:schemas
    {:mir.table/key [:record :mir.table/key
@@ -96,6 +96,21 @@
     (let [n (count (left tree))]
       (cond (< index n) (value-at (left tree) index) (> index n) (value-at (right tree) (- index (+ n 1)))
             :else (option-some-of [:option [:ref :mir.table/value]] (record-get [:ref :mir.table/tree] tree :value))))))
+(defn key-at [tree [:ref :mir.table/tree] index :i64] [:option [:ref :mir.table/key]]
+  (if (or (< index 0) (>= index (count tree))) (option-none-of [:option [:ref :mir.table/key]])
+    (let [n (count (left tree))]
+      (cond (< index n) (key-at (left tree) index) (> index n) (key-at (right tree) (- index (+ n 1)))
+            :else (option-some-of [:option [:ref :mir.table/key]] (record-get [:ref :mir.table/tree] tree :key))))))
+(defn- minimum [tree [:ref :mir.table/tree]] [:ref :mir.table/tree]
+  (if (= (count (left tree)) 0) tree (minimum (left tree))))
+(defn remove [tree [:ref :mir.table/tree] key [:ref :mir.table/key]] [:ref :mir.table/tree]
+  (if (= (count tree) 0) tree
+    (let [order (compare-key key (record-get [:ref :mir.table/tree] tree :key)) a (left tree) b (right tree)]
+      (cond (< order 0) (balance (replace-children tree (remove a key) b))
+            (> order 0) (balance (replace-children tree a (remove b key)))
+            (= (count a) 0) b (= (count b) 0) a
+            :else (let [successor (minimum b) successor-key (record-get [:ref :mir.table/tree] successor :key)]
+                    (balance (branch successor-key (record-get [:ref :mir.table/tree] successor :value) a (remove b successor-key))))))))
 (defn- valid-between? [tree [:ref :mir.table/tree] low [:option [:ref :mir.table/key]] high [:option [:ref :mir.table/key]]] :bool
   (if (= (count tree) 0)
     (and (= (height tree) 0) (not (option-some?-of [:option [:ref :mir.table/tree]] (record-get [:ref :mir.table/tree] tree :left)))

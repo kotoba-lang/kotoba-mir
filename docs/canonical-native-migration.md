@@ -1,6 +1,6 @@
 # Canonical MIR migration: source candidate
 
-This is an incomplete source port, not a native-qualified release. The final
+This is a whole-public-source candidate, not a native-qualified release. The final
 closure uses canonical `.kotoba` and an Amu selfhost-built and rebuilt compiler.
 CLJK/CLJC/CLJS, NBB/KBB, Node, Clojure/Java/JVM/Graal and a C compiler, loader or
 runtime are not final build, packaging or execution prerequisites. CDCI must
@@ -41,6 +41,13 @@ candidate neither overwrites that draft nor uses its host runtime as an oracle.
 | `selection.kotoba` | Target admission and full refusal ordering, every closed field, context offsets, v3 constant-divisor specialization/dead-definition removal and AArch64 zero/equality branch fusion |
 | `schedule.kotoba` | RAW/WAR/WAW dependencies, original-index permutation checks, modeled completion times, critical-path scheduling and AArch64 adjacent fusion protection |
 | `counted.kotoba` | Exact selected countdown structure, closed pure/nontrapping operation proof, isolated-function refusal of calls and validated-module direct pure-leaf admission |
+| `allocator_data.kotoba` | Exact compiler key/set/sequence helpers over persistent AVL tables and paged nodes |
+| `allocator_cfg.kotoba` | Basic blocks, successors/predecessors, dominators, fixed-point liveness, back-edge last uses, definition order, frame interference and slot coloring |
+| `allocator_phi.kotoba` | Edge phi lowering, deterministic parallel copies with cycle slot, and complete transport coalescing |
+| `allocator_linear.kotoba` | Primary linear scan, entry ABI placement, ordered free/reserve pools, call clobber/preserved values, definition-position stores, lazy reloads and exact direct reentry homes |
+| `allocator_spill.kotoba` | The owning explicit all-vreg fallback operation families, typed refusal and frame bounds |
+| `allocator.kotoba` | Whole allocation dispatch, original spill-required-only fallback, stack arguments, post-allocation scheduling and final flat/module validation |
+| `../mir.kotoba` | All 29 original public names connected to the complete supporting source |
 
 IR and refusal data use GMIR's nominal nodes, separate namespace/name text and
 paged children. Large programs and strings are not flattened into bounded
@@ -49,8 +56,8 @@ order; their row positions are not new wire indices.
 
 `kotoba.mir.flat/validate!` validates a **flat component**, including the flat
 version 3 form used inside a module. `kotoba.mir.validation/validate!` dispatches
-flat versions 1/2 and the complete version 3 module source. There is no
-canonical `src/kotoba/mir.kotoba` root yet. Each returns the original
+flat versions 1/2 and the complete version 3 module source. The canonical
+`src/kotoba/mir.kotoba` root now delegates every original public name. Validation returns the original
 input node on success and a typed full-data refusal on failure. Atom tags alone
 do not establish nominal representation validity; a final recursive shape pass
 runs after semantic checks. This pass adds `:non-canonical-value` for invalid
@@ -132,7 +139,7 @@ unique whole-function uses, including phi edges. It preserves both equality
 orientations and leaves other patterns intact.
 
 The scheduler is **not called by target selection**. Its owning invocation is
-after allocation, which remains to be ported. It schedules only the original
+after allocation, which is now connected through the allocator policy. It schedules only the original
 14 pure integer operations; every other operation and protected multiply/add
 or multiply/subtract pair is a barrier. The original last-def/readers algorithm
 captures RAW, WAR and WAW before updating the current read/definition, so a
@@ -185,10 +192,10 @@ outside the selected-function API precondition.
 ## Whole public scope remains required
 
 All 29 original public names and their complete behavior remain acceptance
-scope. Supporting source represents these 28 names:
+scope. The canonical root now represents all 29 names:
 
 ```
-allocator-pool call-argument-registers capability-argument-registers
+allocate-registers allocator-pool call-argument-registers capability-argument-registers
 capability-context-offsets instruction-keysets kernel-atomic-ops
 counted-self-recur-plan counted-self-recur-plans
 kernel-dequant-dot-maximum kernel-dequant-dot-operations kernel-dot-f32-maximum
@@ -198,23 +205,24 @@ runtime-argument-registers runtime-context-offsets saved-registers
 select-target slice-item-limit slice-operations supported-versions targets validate! version
 ```
 
-This public API is still incomplete; the root remains unconnected:
-
-```
-allocate-registers
-```
-
-Remaining source behavior includes allocator integration with the selector and
-scheduler, phi lowering and parallel copies, safe coalescing,
-CFG/dominance/liveness and all allocator/spill/frame policies. Native counted
-proof admission and backend charging integration also remain unqualified.
-No conservative-only replacement or stub root closes this scope.
+The source connects the primary linear scanner, growing scratch/reserve pools,
+preserved call-crossing values, definition-position stores, label-local lazy
+reloads, exact direct reentry homes, phi lowering and parallel copies,
+coalescing, CFG/dominance/liveness, interference-colored frame slots, stack
+arguments and post-allocation scheduling. Only the original `:spill-required`
+refusal selects the all-vreg fallback; other complete refusals propagate.
+The fallback preserves the reference's explicit operation cases and existing
+unsupported-operation refusal. It is not substituted for the primary scanner.
+AVL deletion preserves old roots and rebalances; key rank access retains
+deterministic ordered-vreg traversal. Native source equivalence, record/type
+admission, backend charging, resources and whole-component execution remain
+unqualified. Name coverage is not a condition-equivalence or execution proof.
 The adopted Amu compiler core/lineage, frontend, lowering, optimizer, backend
 and complete full19 Embench workload must be preserved through integration.
 
 ## Evidence and open gates
 
-Seven self-check component sources and an aggregate are present:
+Eight self-check component sources and an aggregate are present:
 
 * `kotoba.mir-catalog-cases/main`: complete table counts/lookup/uniqueness,
   banks, derived operation families, offsets, pool truthiness/order, nested/map
@@ -248,9 +256,19 @@ Seven self-check component sources and an aggregate are present:
   call refusal, safe/trapping/cyclic module leaves on both targets, complete
   validation-error propagation, flat-module refusal and 41 returned plans.
   `large-main` analyzes a countdown with 16,385 additional pure instructions.
-* `kotoba.mir-canonical-cases/main` calls all seven component entries;
+* `kotoba.mir-allocator-cases/main`: the public root on both targets, exact
+  simple physical stream, deterministic repeat, parallel-copy cycles,
+  40-value pressure with result checking in a closed integer-fixture
+  interpreter, call-live preservation, counted direct reentry, seven-argument
+  entry/calls, physical refusal data, CFG dominance/liveness/back-edge use,
+  branch-disjoint slot coloring and complete phi transport coalescing.
+  `large-main` applies both targets to 128-value pressure. The small fixture
+  interpreter refuses unknown operations; it is not a whole-MIR runtime or
+  an alternate compiler. AVL source cases also check deletion/rebalancing,
+  persistence and rank key retrieval.
+* `kotoba.mir-canonical-cases/main` calls all eight component entries;
   `large-main` calls both module large entries plus table/dependency/countdown
-  large entries and returns only an i64 status.
+  large entries plus allocator pressure, and returns only an i64 status.
 
 All entries are **uncompiled and unexecuted**. They are not registered as a
 replacement CI and do not replace the full upstream positive/refusal,
@@ -304,3 +322,10 @@ discovery and retains the pinned-input refusal. It is not a successful owning
 reader/typecheck or a test pass. No `--unpinned` flag, altered source, relaxed
 profile/scope/seal or lock bypass was used. The copies are experimental inputs,
 not vendored dependencies, owning-main integration or an updated resolver lock.
+
+The allocator/root source addition after that attempt requires a fresh complete
+immutable input snapshot and actual native check/compile/run. New rooted
+native compiler/packager generation records are being inspected separately.
+Their core/workload successes do not turn the earlier MIR pinned-input refusal
+into a successful MIR gate. This candidate has no newly established native
+type, compile, execution, authority or resource pass.

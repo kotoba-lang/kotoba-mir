@@ -2,7 +2,7 @@
 ;; Portable modeled cycles are not wall-clock performance evidence.
 (ns kotoba.mir.schedule
   {:kotoba/export [segment-predecessors valid-scheduled-segment? segment-completion-times
-                  segment-sum-completion-times schedule-integer-segment-indices schedule-instructions schedule-program]}
+                  segment-sum-completion-times schedule-integer-segment-indices schedule-instructions schedule-program schedulable?]}
   (:require [kotoba.gmir.node :as node] [kotoba.gmir.identity :as identity]
             [kotoba.mir.operands :as operands] [kotoba.mir.registers :as registers]
             [kotoba.mir.table :as table] [kotoba.mir.outcome :as outcome]))
@@ -189,7 +189,7 @@
           (loop [index 0 out (node/empty-vector)]
             (if (>= index (node/child-count order)) out
               (recur (+ index 1) (node/append out (at instructions (node/number (at order index))))))))))))
-(defn- schedulable? [instruction [:ref :gmir.node/value]] :bool
+(defn schedulable? [instruction [:ref :gmir.node/value]] :bool
   (or (op? instruction :mir/add) (op? instruction :mir/subtract) (op? instruction :mir/multiply)
       (op? instruction :mir/bit-and) (op? instruction :mir/bit-or) (op? instruction :mir/bit-xor)
       (op? instruction :mir/shift-left) (op? instruction :mir/shift-right-signed) (op? instruction :mir/shift-right-unsigned)
