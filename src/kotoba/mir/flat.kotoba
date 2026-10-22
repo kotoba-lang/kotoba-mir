@@ -2,7 +2,7 @@
 ;; allocator and counted-reentry analysis remain separate whole-port work.
 ;; No native admission or execution evidence is claimed for this source.
 (ns kotoba.mir.flat
-  {:kotoba/export [validate!]}
+  {:kotoba/export [validate! representation-error]}
   (:require [kotoba.gmir :as gmir] [kotoba.gmir.node :as node]
             [kotoba.gmir.identity :as identity] [kotoba.gmir.catalog :as gmir-catalog]
             [kotoba.gmir.rodata :as rodata] [kotoba.gmir.outcome :as gmir-outcome]
@@ -319,7 +319,7 @@
       :set (and (= n 0) (not (node/has-namespace? value)) (empty-name? value))
       :map (and (= n 0) (not (node/has-namespace? value)) (empty-name? value) (= (bit-and (node/child-count value) 1) 0))
       false)))
-(defn- representation-error [value [:ref :gmir.node/value]] [:option [:ref :mir/refusal]]
+(defn representation-error [value [:ref :gmir.node/value]] [:option [:ref :mir/refusal]]
   ;; Reader invariants are explicit at this nominal API boundary. Run after
   ;; semantic checks to retain their first refusal for canonical reader values.
   (if (not (representation-shallow? value)) (failure :non-canonical-value value)

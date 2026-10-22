@@ -1,0 +1,19 @@
+;; Source-only aggregate. Not registered CI or native qualification evidence.
+(ns kotoba.mir-canonical-cases
+  {:kotoba/export [main large-main]}
+  (:require [kotoba.mir-catalog-cases :as catalog]
+            [kotoba.mir-flat-cases :as flat]
+            [kotoba.mir-module-cases :as module]))
+
+(defn main [] :i64
+  (let [catalog-result (catalog/main)]
+    (if (not= catalog-result 0) (+ 100 catalog-result)
+      (let [flat-result (flat/main)]
+        (if (not= flat-result 0) (+ 200 flat-result)
+          (let [module-result (module/main)]
+            (if (not= module-result 0) (+ 300 module-result) 0)))))))
+(defn large-main [] :i64
+  (let [module-result (module/large-main)]
+    (if (not= module-result 0) (+ 400 module-result)
+      (let [reentry-result (module/large-reentry-main)]
+        (if (not= reentry-result 0) (+ 500 reentry-result) 0)))))

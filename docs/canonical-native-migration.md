@@ -35,6 +35,7 @@ candidate neither overwrites that draft nor uses its host runtime as an oracle.
 | `outcome.kotoba` | Typed MIR refusals and lossless GMIR refusal adaptation: phase, problem, message and complete data |
 | `registers.kotoba` | Physical register predicate and saved-register scan over every nested collection and map key, returning unique registers in preserved-bank order |
 | `flat.kotoba` | Flat virtual/physical validation, exact fields and version exclusions, ordered profile/bound/ABI checks, labels and v2 GMIR projection |
+| `validation.kotoba` | Full flat/module dispatcher source, function/entry/call/frame checks, symbolic reentry transport, backed values, parallel arguments and stack profiles |
 
 IR and refusal data use GMIR's nominal nodes, separate namespace/name text and
 paged children. Large programs and strings are not flattened into bounded
@@ -42,8 +43,9 @@ documents. Catalog lists represent named lookup, membership or explicit ABI
 order; their row positions are not new wire indices.
 
 `kotoba.mir.flat/validate!` validates a **flat component**, including the flat
-version 3 form used inside a module. It is not the public module dispatcher.
-There is no canonical `src/kotoba/mir.kotoba` root yet. It returns the original
+version 3 form used inside a module. `kotoba.mir.validation/validate!` dispatches
+flat versions 1/2 and the complete version 3 module source. There is no
+canonical `src/kotoba/mir.kotoba` root yet. Each returns the original
 input node on success and a typed full-data refusal on failure. Atom tags alone
 do not establish nominal representation validity; a final recursive shape pass
 runs after semantic checks. This pass adds `:non-canonical-value` for invalid
@@ -75,6 +77,30 @@ nominal values without replacing an earlier semantic refusal.
   reason to silently narrow accepted input during this transcription.
 * A non-sequential scalar saved-register input produces a full-data
   `:non-sequential-instructions` refusal rather than a host sequence exception.
+* Forward call signatures retain their original arity value in refusals. The
+  physical comparison preserves wide integer and f64 ordering, including a
+  fractional forward arity that is rejected only when its function is visited.
+  A nonnumeric forward arity becomes a full-data `:call-arity-mismatch`, replacing
+  an unstructured host comparison exception. Stack profile validation proves
+  that a demanded index beyond the existing 0..63 range cannot be supplied;
+  it does not allocate an unbounded range for an invalid forward signature.
+
+The module checks retain the owning order: function shape, flat instructions,
+physical entry arguments, frame policy, reentry, all-vregs backing and parallel
+loads, direct-call linkage/arity, then physical stack stores. Symbolic reentry
+executes only the closed move/store/load transport language over parameter
+identities. It checks the exact ABI prefix, defined sources, restored slots,
+unique parameter homes, recur argument agreement and termination at an end or
+label. Home tables upsert architectural register locations and at most 4,095
+existing frame slots; their size is not the prefix's instruction count. Pending
+stack stores use paged nodes so a long invalid input is retained in refusal data.
+Stack stores must cover each required index exactly once in the correct area;
+each call/recur consumes the pending group, and leftovers are refused.
+
+The owning validator's existing admission rules remain visible: x86-privileged
+is not in its call-frame classifier, the backed-value set contains exactly 87
+operations, and MIR function-address validation checks the name's type without
+adding a new module membership check. No new gate is inferred from these rules.
 
 These representation/API changes require native parser, caller, hash/resolver
 and CID migration. Name coverage alone is not compatibility or parity proof.
@@ -82,7 +108,7 @@ and CID migration. Name coverage alone is not compatibility or parity proof.
 ## Whole public scope remains required
 
 All 29 original public names and their complete behavior remain acceptance
-scope. Supporting source represents these 24 names:
+scope. Supporting source represents these 25 names:
 
 ```
 allocator-pool call-argument-registers capability-argument-registers
@@ -91,19 +117,18 @@ kernel-dequant-dot-maximum kernel-dequant-dot-operations kernel-dot-f32-maximum
 kernel-window-maxima kernel-window-operations leaf-registers physical-registers
 preserved-registers privileged-argument-registers return-registers
 runtime-argument-registers runtime-context-offsets saved-registers
-slice-item-limit slice-operations supported-versions targets version
+slice-item-limit slice-operations supported-versions targets validate! version
 ```
 
-These five public APIs are still incomplete or unconnected:
+These four public APIs are still incomplete; the root remains unconnected:
 
 ```
-validate! select-target allocate-registers
+select-target allocate-registers
 counted-self-recur-plan counted-self-recur-plans
 ```
 
-Remaining behavior includes the complete v3 module/call graph and frame checks,
-symbolic reentry transport, stack argument profiles, target selection and
-exclusions, latency/dependency scheduling, zero-equality fusion, all selected
+Remaining source behavior includes target selection and exclusions,
+latency/dependency scheduling, zero-equality fusion, all selected
 operation optimizations, phi lowering and parallel copies, safe coalescing,
 CFG/dominance/liveness, all allocator/spill/frame policies, and counted fuel
 analysis. No conservative-only replacement or stub root closes this scope.
@@ -112,7 +137,7 @@ and complete full19 Embench workload must be preserved through integration.
 
 ## Evidence and open gates
 
-Two self-check entry sources are present:
+Three self-check component sources and an aggregate are present:
 
 * `kotoba.mir-catalog-cases/main`: complete table counts/lookup/uniqueness,
   banks, derived operation families, offsets, pool truthiness/order, nested/map
@@ -121,8 +146,16 @@ Two self-check entry sources are present:
   removal and an extra field per row; all 37 runtime, 55 privileged and 8
   capability ABI rows; list/vector/count rules; version and first-refusal
   ordering; labels/frames; repaired v2 projection and nominal representation.
+* `kotoba.mir-module-cases/main`: both targets, full return/refusal data,
+  function/entry/frame ordering, spill-restored and clobbered reentry homes,
+  termination, backing and parallel loads, forward linkage/nonnumeric/fractional
+  arities, outgoing/incoming stores, duplicates, per-call consumption and recur
+  stack arguments. Separate large entries construct 16,385-instruction and
+  16,385-move reentry prefixes without imposing a logical per-list limit.
+* `kotoba.mir-canonical-cases/main` calls all three component entries;
+  `large-main` calls both module large entries and returns only an i64 status.
 
-Both entries are **uncompiled and unexecuted**. They are not registered as a
+All entries are **uncompiled and unexecuted**. They are not registered as a
 replacement CI and do not replace the full upstream positive/refusal,
 authority, allocation, fuel, stack, cleanup and large-input corpus.
 
@@ -131,7 +164,9 @@ pinned Git data and reads source forms for imports/arity, schema/record use,
 type positions, lexical names and forbidden host forms. It checks that all 30
 reference flat refusal names remain present. It does not execute MIR, GMIR,
 the compiler, a generator, an oracle, or tests, and is not the owning EDN reader
-or a typechecker.
+or a typechecker. The same inspection checks the 11 module refusal names and
+all 87 backed-value operations against the owning reference; those inventories
+are not proof of condition equivalence or runtime parity.
 
 No qualified independent compiler ELF entry has been established for this
 candidate. Native execution is authorized; the compiler entry is the missing
