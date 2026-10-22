@@ -6,7 +6,8 @@
             [kotoba.mir-module-cases :as module]
             [kotoba.mir-table-cases :as table]
             [kotoba.mir-selection-cases :as selection]
-            [kotoba.mir-schedule-cases :as schedule]))
+            [kotoba.mir-schedule-cases :as schedule]
+            [kotoba.mir-counted-cases :as counted]))
 
 (defn main [] :i64
   (let [catalog-result (catalog/main)]
@@ -20,7 +21,9 @@
                   (let [selection-result (selection/main)]
                     (if (not= selection-result 0) (+ 700 selection-result)
                       (let [schedule-result (schedule/main)]
-                        (if (not= schedule-result 0) (+ 800 schedule-result) 0)))))))))))))
+                        (if (not= schedule-result 0) (+ 800 schedule-result)
+                          (let [counted-result (counted/main)]
+                            (if (not= counted-result 0) (+ 1100 counted-result) 0)))))))))))))))
 (defn large-main [] :i64
   (let [module-result (module/large-main)]
     (if (not= module-result 0) (+ 400 module-result)
@@ -29,4 +32,6 @@
           (let [table-result (table/large-main)]
             (if (not= table-result 0) (+ 900 table-result)
               (let [schedule-result (schedule/large-main)]
-                (if (not= schedule-result 0) (+ 1000 schedule-result) 0)))))))))
+                (if (not= schedule-result 0) (+ 1000 schedule-result)
+                  (let [counted-result (counted/large-main)]
+                    (if (not= counted-result 0) (+ 1200 counted-result) 0)))))))))))

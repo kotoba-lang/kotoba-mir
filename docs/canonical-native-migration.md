@@ -40,6 +40,7 @@ candidate neither overwrites that draft nor uses its host runtime as an oracle.
 | `operands.kotoba` | The complete ordered source sequence, with phi/indexed/argument operands, exact named identity and filtered use counts |
 | `selection.kotoba` | Target admission and full refusal ordering, every closed field, context offsets, v3 constant-divisor specialization/dead-definition removal and AArch64 zero/equality branch fusion |
 | `schedule.kotoba` | RAW/WAR/WAW dependencies, original-index permutation checks, modeled completion times, critical-path scheduling and AArch64 adjacent fusion protection |
+| `counted.kotoba` | Exact selected countdown structure, closed pure/nontrapping operation proof, isolated-function refusal of calls and validated-module direct pure-leaf admission |
 
 IR and refusal data use GMIR's nominal nodes, separate namespace/name text and
 paged children. Large programs and strings are not flattened into bounded
@@ -150,14 +151,46 @@ map/set. This is internal compiler data structure source, not another compiler
 lineage. AVL invariants, sharing/copying, native record layouts, recursion/stack,
 arena/fuel and large-input resource costs are all unqualified until execution.
 
+### Counted reentry boundary
+
+The isolated `counted-self-recur-plan` takes a selected virtual-MIR function,
+as in the owning contract, and returns `Option` of the complete original plan.
+The module API validates first, preserves any complete validation refusal,
+then requires version 3 virtual MIR. It returns `Result` of a paged nominal map
+whose keys are the original function symbols, without a 32-function map limit.
+The returned plan retains `:counter-parameter`, `:runtime-domain
+:nonnegative-i64` and `:charge :entry-plus-exact-self-recur-count`.
+
+The proof preserves the exact 19-operation allow-list; constant quotient is
+admitted separately only for an i64 divisor other than 0 or -1. General
+quotient, memory, capability/runtime calls and unknown operations stay outside
+the proof. It requires the complete indexed argument profile; one nonzero
+branch, adjacent base return and body label; the matching label; and one
+terminal self tail-call with exact arity. That tail argument must resolve to
+`counter - one`, with the last definition of one having the exact integer
+value 1. Reverse definition search preserves the reference's last-definition
+behavior. Argument presence plus exact cardinality retains the reference's
+sorted-index comparison without sorting a bounded container.
+
+Only a validated closed module may authorize a direct call to a proven pure
+leaf with exactly one return. A leaf cannot contain calls, tail calls or
+branches, so recursive and non-leaf call chains cannot gain authority through
+a transitive shortcut. The proof does not compute a runtime charge or admit
+negative counters; backend per-edge fallback and actual fuel/resource behavior
+still require execution. Canonical numeric/named representations and typed
+outcomes need native reader, caller and CID integration just like the other
+modules. This source port does not qualify arbitrary malformed host objects
+outside the selected-function API precondition.
+
 ## Whole public scope remains required
 
 All 29 original public names and their complete behavior remain acceptance
-scope. Supporting source represents these 26 names:
+scope. Supporting source represents these 28 names:
 
 ```
 allocator-pool call-argument-registers capability-argument-registers
 capability-context-offsets instruction-keysets kernel-atomic-ops
+counted-self-recur-plan counted-self-recur-plans
 kernel-dequant-dot-maximum kernel-dequant-dot-operations kernel-dot-f32-maximum
 kernel-window-maxima kernel-window-operations leaf-registers physical-registers
 preserved-registers privileged-argument-registers return-registers
@@ -165,23 +198,23 @@ runtime-argument-registers runtime-context-offsets saved-registers
 select-target slice-item-limit slice-operations supported-versions targets validate! version
 ```
 
-These three public APIs are still incomplete; the root remains unconnected:
+This public API is still incomplete; the root remains unconnected:
 
 ```
 allocate-registers
-counted-self-recur-plan counted-self-recur-plans
 ```
 
 Remaining source behavior includes allocator integration with the selector and
 scheduler, phi lowering and parallel copies, safe coalescing,
-CFG/dominance/liveness, all allocator/spill/frame policies, and counted fuel
-analysis. No conservative-only replacement or stub root closes this scope.
+CFG/dominance/liveness and all allocator/spill/frame policies. Native counted
+proof admission and backend charging integration also remain unqualified.
+No conservative-only replacement or stub root closes this scope.
 The adopted Amu compiler core/lineage, frontend, lowering, optimizer, backend
 and complete full19 Embench workload must be preserved through integration.
 
 ## Evidence and open gates
 
-Six self-check component sources and an aggregate are present:
+Seven self-check component sources and an aggregate are present:
 
 * `kotoba.mir-catalog-cases/main`: complete table counts/lookup/uniqueness,
   banks, derived operation families, offsets, pool truthiness/order, nested/map
@@ -209,9 +242,15 @@ Six self-check component sources and an aggregate are present:
   fusion protection, immediate/phi/compare-exchange sources and 64-reader
   anti-dependency fan-in. `large-main` checks the complete 16,385-reader
   dependency set; this does not measure the full large scheduling runtime.
-* `kotoba.mir-canonical-cases/main` calls all six component entries;
-  `large-main` calls both module large entries plus table/dependency large
-  entries and returns only an i64 status.
+* `kotoba.mir-counted-cases/main`: full returned plan, integer text and divisor
+  bounds, sorted argument identity, both counter positions, each structural
+  condition, last-definition behavior, all 104 catalog operations, isolated
+  call refusal, safe/trapping/cyclic module leaves on both targets, complete
+  validation-error propagation, flat-module refusal and 41 returned plans.
+  `large-main` analyzes a countdown with 16,385 additional pure instructions.
+* `kotoba.mir-canonical-cases/main` calls all seven component entries;
+  `large-main` calls both module large entries plus table/dependency/countdown
+  large entries and returns only an i64 status.
 
 All entries are **uncompiled and unexecuted**. They are not registered as a
 replacement CI and do not replace the full upstream positive/refusal,
@@ -227,6 +266,8 @@ all 87 backed-value operations against the owning reference; those inventories
 are not proof of condition equivalence or runtime parity. It also compares all
 30 selector field mappings, the 16 ordered direct source fields and the 14
 schedulable operations against the pinned owning data.
+The counted proof's complete 19-operation pure set is also compared as literal
+source data; that inventory does not prove the proof's conditions equivalent.
 
 No qualified independent compiler ELF entry has been established for this
 candidate. Native execution is authorized; the compiler entry is the missing
@@ -236,3 +277,19 @@ all positive/refusal/authority/resource execution, whole native self-rebuild
 and fixed point, owning main/lock/CID integration and native CDCI gate/controller
 qualification remain open. Static source inspection does not close any of
 these gates.
+
+An actual native bootstrap check was attempted with the experimental FS2
+AArch64 ELF SHA-256
+`b4ff2578e7643346c533446bb3a1df1819c22fa71f8389df2da0cbc121338809`.
+The aggregate and all MIR test/production and GMIR source paths were supplied.
+The existing VM could stat the input, but the compiler returned exit 1,
+`seed: E3 cannot read input file`, before MIR admission; the worktree is outside
+that experiment's configured filesystem scope. The same ELF checked its
+existing in-scope 57-byte smoke source with exit 0 and `ok`. Neither result is
+MIR compilation or suite execution. No scope, lock, seal, profile or public
+wrapper was relaxed. The ELF sidecar still labels its initial IR materializer
+as a temporary Python calculator outside the accepted build closure; that
+calculator was not run for this MIR work. Native process tracing remains open
+(the existing VM has no `strace`). A separately reproduced, smaller historical
+root is a different source snapshot and does not qualify this current source
+closure through its fixed-point receipt.
