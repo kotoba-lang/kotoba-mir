@@ -386,5 +386,47 @@
     "owning main/resolver/Definition CID",
     "public compiler target/profile/seal/CLI",
     "x86_64-linux-static CDCI/controller and process trace"
-  ]
+  ],
+  "integratedCompiler": {
+    "G7": {
+      "bytes": 2726240,
+      "sha256": "f3a4b31d4219c5e8d920885093f565388ffe0e1ea8dc81073094e435bb94751d"
+    },
+    "G7KSEED": {
+      "bytes": 2587395,
+      "sha256": "870b7ba49b28edf44d325594ce46aa5e5df212046c9ccc294f9a48db29fc1fbb"
+    },
+    "G8KSEED": {
+      "bytes": 2587395,
+      "sha256": "870b7ba49b28edf44d325594ce46aa5e5df212046c9ccc294f9a48db29fc1fbb"
+    },
+    "G7G8ByteIdentical": true,
+    "nativeCheckExit": 0,
+    "nativeCompileExit": 0,
+    "MIRContainer": {
+      "bytes": 858771,
+      "sha256": "89ea961469ad3c8642f52bf6201637684f9e57e9485d0e6e26fc03b4f29d0738"
+    },
+    "MIRContainerByteIdenticalToG5": true,
+    "directAggregateExecutions": [
+      {
+        "symbol": "main",
+        "nativeExit": 0,
+        "elf": {
+          "bytes": 887136,
+          "sha256": "2030c90f8e8175960ce07b44780543de9f11ba3280224aac6a2366c5fc83b8c4"
+        },
+        "byteIdenticalToG5ExecutedELF": true
+      },
+      {
+        "symbol": "large-main",
+        "nativeExit": 0,
+        "elf": {
+          "bytes": 887136,
+          "sha256": "23d17fea882d06aeb685b38c19cc3ea2da5cad4e1a38564cb09a6180fc08c6e3"
+        },
+        "byteIdenticalToG5ExecutedELF": true
+      }
+    ]
+  }
 }

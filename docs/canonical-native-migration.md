@@ -328,3 +328,9 @@ do not claim that those entire historical suites have been run.
 
 Limited source-data inspections remain useful for table/refusal/field-set
 preservation, but are not native execution or proof of full condition parity.
+
+The integrated parent reader successor in Amu #1491 rebuilds G7/G8 byte-identically
+and checks/compiles the same MIR input closure. Its MIR KSEED and both directly
+re-executed aggregate ELFs are byte-identical to the G5 artifacts above; both
+ordinary and whole-large aggregate executions again exit zero. Exact integrated
+generation hashes are appended in the same correctness receipt.
