@@ -1,7 +1,7 @@
 ;; Uncompiled/unexecuted native self-check source. Complete upstream corpus,
 ;; allocation/fuel/authority/resource qualification remain separate gates.
 (ns kotoba.mir-module-cases
-  {:kotoba/export [main large-main large-reentry-main]}
+  {:kotoba/export [main large-main large-reentry-main same-value?]}
   (:require [kotoba.gmir.node :as node] [kotoba.mir.catalog :as catalog]
             [kotoba.mir.validation :as validation] [kotoba.mir.outcome :as outcome]))
 
@@ -39,6 +39,7 @@
            :else
            (loop [index 0]
              (if (>= index count) true (if (same? (at a index) (at b index)) (recur (+ index 1)) false)))))))
+(defn same-value? [left [:ref :gmir.node/value] right [:ref :gmir.node/value]] :bool (same? left right))
 (defn- ok? [program [:ref :gmir.node/value]] :bool
   (let [result (validation/validate! program)]
     (and (result-ok?-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] result)

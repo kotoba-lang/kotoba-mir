@@ -36,6 +36,10 @@ candidate neither overwrites that draft nor uses its host runtime as an oracle.
 | `registers.kotoba` | Physical register predicate and saved-register scan over every nested collection and map key, returning unique registers in preserved-bank order |
 | `flat.kotoba` | Flat virtual/physical validation, exact fields and version exclusions, ordered profile/bound/ABI checks, labels and v2 GMIR projection |
 | `validation.kotoba` | Full flat/module dispatcher source, function/entry/call/frame checks, symbolic reentry transport, backed values, parallel arguments and stack profiles |
+| `table.kotoba` | Persistent AVL tables for exact nil/ordinal/keyword/symbol identities and nested ordinal sets; no typed-map/set 32-entry ceiling |
+| `operands.kotoba` | The complete ordered source sequence, with phi/indexed/argument operands, exact named identity and filtered use counts |
+| `selection.kotoba` | Target admission and full refusal ordering, every closed field, context offsets, v3 constant-divisor specialization/dead-definition removal and AArch64 zero/equality branch fusion |
+| `schedule.kotoba` | RAW/WAR/WAW dependencies, original-index permutation checks, modeled completion times, critical-path scheduling and AArch64 adjacent fusion protection |
 
 IR and refusal data use GMIR's nominal nodes, separate namespace/name text and
 paged children. Large programs and strings are not flattened into bounded
@@ -105,10 +109,51 @@ adding a new module membership check. No new gate is inferred from these rules.
 These representation/API changes require native parser, caller, hash/resolver
 and CID migration. Name coverage alone is not compatibility or parity proof.
 
+### Selection and scheduling boundary
+
+`selection/select-target` accepts the target as a nominal node, so an unsupported
+target's entire value survives the typed refusal. Target rejection precedes
+GMIR validation; GMIR errors keep their phase/message/data. Privileged target
+refusals precede fused-dequant target refusals. Repeated privileged actions and
+first-encounter order of distinct refused formats are retained across functions.
+Both targets admit scalar dot-f32 and the existing rodata/function address
+forms; AArch64 admits Q8_0 and refuses the rest of the current fused-dequant
+family. New formats remain refused until explicitly admitted.
+
+Every validated GMIR field is carried into MIR, with operation and phi incoming
+keys renamed and runtime/capability context offsets added. Flat versions 1/2
+retain direct translation. Version 3 retains the original single-pass constant
+environment, captures a divisor's entire literal, removes that field's register
+source, and removes only specialized definitions with no remaining vreg uses.
+The exact integer zero predicate replaces host-number conversion. AArch64
+zero/equal/branch fusion requires adjacency, three distinct identities and
+unique whole-function uses, including phi edges. It preserves both equality
+orientations and leaves other patterns intact.
+
+The scheduler is **not called by target selection**. Its owning invocation is
+after allocation, which remains to be ported. It schedules only the original
+14 pure integer operations; every other operation and protected multiply/add
+or multiply/subtract pair is a barrier. The original last-def/readers algorithm
+captures RAW, WAR and WAW before updating the current read/definition, so a
+read-modify-write has no self-edge. Critical-path height then original index
+select the next ready instruction. Multiply has modeled latency 3 on both
+known targets; other operations have latency 1. Waiting advances the conceptual
+cycle without inserting instructions. Exact original-index permutations keep
+structurally duplicate instruction values distinct. Verification refuses a
+dependency violation with the entire segment and proposed order.
+
+Tables retain keyword versus symbol and separate namespace/name byte chunks,
+including absent versus empty namespace and embedded slash ambiguity. AVL
+updates preserve old roots; cached cardinality supplies ordered set access.
+Tables and graph edges are not a bounded generic document or a 32-entry native
+map/set. This is internal compiler data structure source, not another compiler
+lineage. AVL invariants, sharing/copying, native record layouts, recursion/stack,
+arena/fuel and large-input resource costs are all unqualified until execution.
+
 ## Whole public scope remains required
 
 All 29 original public names and their complete behavior remain acceptance
-scope. Supporting source represents these 25 names:
+scope. Supporting source represents these 26 names:
 
 ```
 allocator-pool call-argument-registers capability-argument-registers
@@ -117,19 +162,18 @@ kernel-dequant-dot-maximum kernel-dequant-dot-operations kernel-dot-f32-maximum
 kernel-window-maxima kernel-window-operations leaf-registers physical-registers
 preserved-registers privileged-argument-registers return-registers
 runtime-argument-registers runtime-context-offsets saved-registers
-slice-item-limit slice-operations supported-versions targets validate! version
+select-target slice-item-limit slice-operations supported-versions targets validate! version
 ```
 
-These four public APIs are still incomplete; the root remains unconnected:
+These three public APIs are still incomplete; the root remains unconnected:
 
 ```
-select-target allocate-registers
+allocate-registers
 counted-self-recur-plan counted-self-recur-plans
 ```
 
-Remaining source behavior includes target selection and exclusions,
-latency/dependency scheduling, zero-equality fusion, all selected
-operation optimizations, phi lowering and parallel copies, safe coalescing,
+Remaining source behavior includes allocator integration with the selector and
+scheduler, phi lowering and parallel copies, safe coalescing,
 CFG/dominance/liveness, all allocator/spill/frame policies, and counted fuel
 analysis. No conservative-only replacement or stub root closes this scope.
 The adopted Amu compiler core/lineage, frontend, lowering, optimizer, backend
@@ -137,7 +181,7 @@ and complete full19 Embench workload must be preserved through integration.
 
 ## Evidence and open gates
 
-Three self-check component sources and an aggregate are present:
+Six self-check component sources and an aggregate are present:
 
 * `kotoba.mir-catalog-cases/main`: complete table counts/lookup/uniqueness,
   banks, derived operation families, offsets, pool truthiness/order, nested/map
@@ -152,8 +196,22 @@ Three self-check component sources and an aggregate are present:
   arities, outgoing/incoming stores, duplicates, per-call consumption and recur
   stack arguments. Separate large entries construct 16,385-instruction and
   16,385-move reentry prefixes without imposing a logical per-list limit.
-* `kotoba.mir-canonical-cases/main` calls all three component entries;
-  `large-main` calls both module large entries and returns only an i64 status.
+* `kotoba.mir-table-cases/main`: all four AVL rotations, ordered lookup,
+  persistence/update, present nil versus missing, nested sets and identity
+  ambiguity. `large-main` inserts and checks all 16,700 ordinal keys.
+* `kotoba.mir-selection-cases/main`: all 92 GMIR rows on both targets with an
+  independent literal field mapping, exact target/GMIR refusal facts and order,
+  divisor capture/dead versus shared definitions, flat-version behavior,
+  scalar representations and zero fusion's adjacency/identity/global-use guards.
+* `kotoba.mir-schedule-cases/main`: both targets, RAW/WAR/WAW, duplicate
+  instruction identities, invalid/duplicate/out-of-range index orders, exact
+  modeled completion vectors and sums, all barrier classes, adjacent add/sub
+  fusion protection, immediate/phi/compare-exchange sources and 64-reader
+  anti-dependency fan-in. `large-main` checks the complete 16,385-reader
+  dependency set; this does not measure the full large scheduling runtime.
+* `kotoba.mir-canonical-cases/main` calls all six component entries;
+  `large-main` calls both module large entries plus table/dependency large
+  entries and returns only an i64 status.
 
 All entries are **uncompiled and unexecuted**. They are not registered as a
 replacement CI and do not replace the full upstream positive/refusal,
@@ -166,7 +224,9 @@ reference flat refusal names remain present. It does not execute MIR, GMIR,
 the compiler, a generator, an oracle, or tests, and is not the owning EDN reader
 or a typechecker. The same inspection checks the 11 module refusal names and
 all 87 backed-value operations against the owning reference; those inventories
-are not proof of condition equivalence or runtime parity.
+are not proof of condition equivalence or runtime parity. It also compares all
+30 selector field mappings, the 16 ordered direct source fields and the 14
+schedulable operations against the pinned owning data.
 
 No qualified independent compiler ELF entry has been established for this
 candidate. Native execution is authorized; the compiler entry is the missing
