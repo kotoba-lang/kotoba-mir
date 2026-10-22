@@ -293,3 +293,14 @@ calculator was not run for this MIR work. Native process tracing remains open
 (the existing VM has no `strace`). A separately reproduced, smaller historical
 root is a different source snapshot and does not qualify this current source
 closure through its fixed-point receipt.
+
+A second check copied all 25 MIR/test/GMIR source files (342,692 bytes) exactly
+from MIR `f450fd0ac5f4024f7e8d6edbbc44ad5b3983bc5d` and the GMIR pin above
+into a separate input-audit directory within the existing experimental scope.
+The source bytes were compared to Git, and all three source paths were kept.
+The same native ELF then returned exit 1, `E6015 a multi-module compile needs
+pinned inputs`, naming `kotoba/mir/counted.kotoba`. This reaches native project
+discovery and retains the pinned-input refusal. It is not a successful owning
+reader/typecheck or a test pass. No `--unpinned` flag, altered source, relaxed
+profile/scope/seal or lock bypass was used. The copies are experimental inputs,
+not vendored dependencies, owning-main integration or an updated resolver lock.
