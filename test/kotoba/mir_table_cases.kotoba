@@ -1,4 +1,4 @@
-;; Source-only AVL/identity cases. Not executed or a resource qualification.
+;; Native AVL/identity self-checks, including multi-page large inputs.
 (ns kotoba.mir-table-cases
   {:kotoba/export [main large-main]}
   (:require [kotoba.gmir.node :as node] [kotoba.mir.table :as table]))

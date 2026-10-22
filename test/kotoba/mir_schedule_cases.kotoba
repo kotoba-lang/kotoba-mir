@@ -1,4 +1,4 @@
-;; Uncompiled/unexecuted full-data scheduling checks. Modeled cycles are not
+;; Native full-data scheduling self-checks. Modeled cycles are not
 ;; measurements, and the complete upstream/allocator/resource corpus is open.
 (ns kotoba.mir-schedule-cases
   {:kotoba/export [main large-main]}
@@ -8,7 +8,7 @@
             [kotoba.mir-module-cases :as check]))
 
 (defn- at [value [:ref :gmir.node/value] index :i64] [:ref :gmir.node/value]
-  (option-value-of [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value)))
+  (option-match [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value) item item))
 (defn- kw [value :keyword] [:ref :gmir.node/value] (node/keyword-literal value))
 (defn- add-key [values [:list :keyword] key :keyword] [:list :keyword] (typed-list-conj [:list :keyword] values key))
 (defn- v [index :i64] [:ref :gmir.node/value]
@@ -56,7 +56,7 @@
         bad (-> (node/empty-vector) (node/append (node/i64-value 0)) (node/append (node/i64-value 0)))
         reversed (-> (node/empty-vector) (node/append (node/i64-value 1)) (node/append (node/i64-value 0)))
         list-order (-> (node/empty-list) (node/append (node/integer-value (node/string-text "0"))) (node/append (node/i64-value 1)))
-        bytes-order (node/bytes-value (node/text (typed-list-conj [:list :bytes] (typed-list-new [:list :bytes]) (bytes-from-vector-i64 (vector-new 0 1)))))
+        bytes-order (node/bytes-value (node/text (typed-list-conj [:list :bytes] (typed-list-new [:list :bytes]) (bytes-from-vector-i64 [0 1]))))
         result (schedule/segment-completion-times :x86-64 code reversed)
         error (result-error-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] result (outcome/refusal :unexpected-success (node/nil-value)))]
     (and (schedule/valid-scheduled-segment? :x86-64 code good)

@@ -12,12 +12,12 @@
       [[:instructions [:ref :gmir.node/value]] [:divisors [:ref :mir.table/tree]]]]}))
 
 (defn- at [value [:ref :gmir.node/value] index :i64] [:ref :gmir.node/value]
-  (option-value-of [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value)))
-(defn- named? [value [:ref :gmir.node/value] key :keyword] :bool (node/same-name? value (node/keyword-literal key)))
-(defn- op? [value [:ref :gmir.node/value] key :keyword] :bool (named? (node/key value :mir/op) key))
-(defn- gmir-op? [value [:ref :gmir.node/value] key :keyword] :bool (named? (node/key value :gmir/op) key))
+  (option-match [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value) item item))
+(defn- named? [value [:ref :gmir.node/value] key :keyword] :bool (arena-scope (node/keyword-is? value key)))
+(defn- op? [value [:ref :gmir.node/value] key :keyword] :bool (arena-scope (named? (node/key value :mir/op) key)))
+(defn- gmir-op? [value [:ref :gmir.node/value] key :keyword] :bool (arena-scope (named? (node/key value :gmir/op) key)))
 (defn- same-identity? [a [:ref :gmir.node/value] b [:ref :gmir.node/value]] :bool
-  (or (node/same-name? a b) (and (= (node/kind a) :nil) (= (node/kind b) :nil))))
+  (arena-scope (or (node/same-name? a b) (and (= (node/kind a) :nil) (= (node/kind b) :nil)))))
 (defn- rename-key [value [:ref :gmir.node/value]] [:ref :gmir.node/value]
   (node/keyword-parts (option-some-of [:option [:ref :gmir.node/text]] (node/string-text "mir")) (node/name-of value)))
 (defn- offset [values [:list [:ref :mir.catalog/offset]] key [:ref :gmir.node/value]] [:ref :gmir.node/value]
@@ -49,9 +49,9 @@
     (if (>= index (node/child-count value)) out
       (recur (+ index 2) (if (named? (at value index) key) out (node/append (node/append out (at value index)) (at value (+ index 1))))))))
 (defn- zero? [value [:ref :gmir.node/value]] :bool
-  ;; Exact admitted i64 comparison replaces bounded host-number conversion.
+  (arena-scope ;; Exact admitted i64 comparison replaces bounded host-number conversion.
   (let [number (identity/integer-i64 value)]
-    (and (option-some?-of [:option :i64] number) (= (option-value-of [:option :i64] number 1) 0))))
+    (and (option-some?-of [:option :i64] number) (= (option-match [:option :i64] number 1 found-value found-value) 0)))))
 (defn- fuse-zero-branches [target :keyword instructions [:ref :gmir.node/value]] [:ref :gmir.node/value]
   (if (not= target :aarch64) instructions
     (let [uses (operands/counts target false instructions)]
@@ -77,7 +77,7 @@
                   specialize (and (gmir-op? instruction :gmir/quotient) (option-some?-of [:option [:ref :mir.table/value]] divisor))
                   original (select-instruction instruction)
                   value (if specialize (drop-key (-> original (node/put-key :mir/op (node/keyword-literal :mir/quotient-constant))
-                                                  (node/put-key :mir/divisor (table/data (option-value-of [:option [:ref :mir.table/value]] divisor (table/scalar (node/nil-value)))))) :mir/right) original)
+                                                  (node/put-key :mir/divisor (table/data (option-match [:option [:ref :mir.table/value]] divisor (table/scalar (node/nil-value)) found-value found-value)))) :mir/right) original)
                   updated (if (gmir-op? instruction :gmir/constant)
                             (table/put constants (operands/key-of (node/key instruction :gmir/dst)) (table/scalar (node/key instruction :gmir/value))) constants)]
               (recur (+ index 1) updated (if specialize (table/put specialized (operands/key-of right) (table/scalar right)) specialized)
@@ -94,11 +94,11 @@
                            (= (operands/count-of live dst) 0))]
           (recur (+ index 1) (if discard out (node/append out value))))))))
 (defn- member? [values [:list :keyword] value [:ref :gmir.node/value]] :bool
-  (loop [index 0]
+  (arena-scope (loop [index 0]
     (if (>= index (vector-count values)) false
-      (if (named? value (typed-list-nth [:list :keyword] values index)) true (recur (+ index 1))))))
+      (if (named? value (typed-list-nth [:list :keyword] values index)) true (recur (+ index 1)))))))
 (defn- excluded-operations [program [:ref :gmir.node/value] privileged :bool] [:ref :gmir.node/value]
-  (let [version (option-value-of [:option :i64] (identity/integer-i64 (node/key program :gmir/version)) 0)
+  (let [version (option-match [:option :i64] (identity/integer-i64 (node/key program :gmir/version)) 0 found-value found-value)
         functions (node/key program :gmir/functions) module (= version 3)
         groups (if module (node/child-count functions) 1)
         dequant (if privileged (typed-list-new [:list :keyword]) (gmir/kernel-dequant-dot-operations))]
@@ -126,7 +126,7 @@
             (option-some-of [:option [:ref :mir/refusal]] (outcome/refusal :x86-simd-target-mismatch
               (-> (node/empty-map) (node/put-key :target target) (node/put-key :operations operations))))))))))
 (defn- selected-program [target [:ref :gmir.node/value] program [:ref :gmir.node/value]] [:ref :gmir.node/value]
-  (let [version (node/key program :gmir/version) number (option-value-of [:option :i64] (identity/integer-i64 version) 0)
+  (let [version (node/key program :gmir/version) number (option-match [:option :i64] (identity/integer-i64 version) 0 found-value found-value)
         target-key (if (named? target :x86-64) :x86-64 :aarch64)
         base (-> (node/empty-map) (node/put-key :mir/version (if (= number 3) (node/i64-value 3) version))
                  (node/put-key :mir/target target) (node/put-key :mir/registers (node/keyword-literal :virtual)))]
@@ -155,5 +155,5 @@
         (let [error (target-error target program)]
           (if (option-some?-of [:option [:ref :mir/refusal]] error)
             (result-err-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]]
-              (option-value-of [:option [:ref :mir/refusal]] error (outcome/refusal :unsupported-target target)))
+              (option-match [:option [:ref :mir/refusal]] error (outcome/refusal :unsupported-target target) found-value found-value))
             (validation/validate! (selected-program target program))))))))

@@ -59,6 +59,7 @@
              (let [entry (typed-list-nth [:list [:ref :mir.catalog/shape]] all index)
                    name (catalog/shape-operation entry) keys (catalog/shape-keys entry)]
                (if (and (not (gmir-catalog/keyword-member? seen name)) (unique-keywords? keys)
+                        (same-keywords? keys (catalog/instruction-keys name))
                         (gmir-catalog/keyword-member? keys :mir/op) (>= (vector-count keys) 2))
                  (recur (+ index 1) (typed-list-conj [:list :keyword] seen name)) false)))))))
 (defn- options [leaf [:ref :gmir.node/value]] [:ref :gmir.node/value]
@@ -116,6 +117,39 @@
     (and (= (outcome/phase converted) :gmir) (= (outcome/problem converted) :phi-predecessor-mismatch)
          (string=? (outcome/message converted) (gmir-outcome/message original))
          (node/same-name? (node/key (outcome/instruction converted) :target) (node/keyword-literal :aarch64)))))
+(defn- lookup-equivalence? [] :bool
+  (let [all (gmir-catalog/instruction-keysets) names (gmir-catalog/instruction-operations)
+        mir-all (catalog/instruction-keysets) mir-names (catalog/instruction-operations)]
+    (and (= (vector-count names) (vector-count all)) (= (vector-count mir-names) (vector-count mir-all))
+         (= (vector-count (catalog/instruction-keys :unknown)) 0)
+         (not (option-some?-of [:option [:list :keyword]] (gmir-catalog/instruction-keys :unknown)))
+         (loop [index 0]
+           (if (>= index (vector-count all)) true
+             (let [entry (typed-list-nth [:list [:ref :gmir.catalog/keyset]] all index)
+                   op (gmir-catalog/keyset-operation entry)
+                   keys (gmir-catalog/instruction-keys op)]
+               (and (= op (typed-list-nth [:list :keyword] names index))
+                    (option-some?-of [:option [:list :keyword]] keys)
+                    (same-keywords? (gmir-catalog/keyset-keys entry) (option-value-of [:option [:list :keyword]] keys (typed-list-new [:list :keyword])))
+                    (recur (+ index 1))))))
+         (loop [index 0]
+           (if (>= index (vector-count mir-all)) true
+             (and (= (catalog/shape-operation (typed-list-nth [:list [:ref :mir.catalog/shape]] mir-all index))
+                     (typed-list-nth [:list :keyword] mir-names index)) (recur (+ index 1))))))))
+(defn- keyword-comparison? [] :bool
+  (let [all (catalog/instruction-keysets)
+        absent (node/keyword-parts (option-none-of [:option [:ref :gmir.node/text]]) (node/string-text "mir/op"))
+        empty-ns (node/keyword-parts (option-some-of [:option [:ref :gmir.node/text]] (node/empty-text)) (node/string-text "op"))
+        symbol (node/symbol-parts (option-some-of [:option [:ref :gmir.node/text]] (node/string-text "mir")) (node/string-text "op"))]
+    (and (not (node/keyword-is? absent :mir/op)) (not (node/keyword-is? empty-ns :mir/op))
+         (not (node/keyword-is? symbol :mir/op)) (not (node/keyword-is? (node/nil-value) :mir/op))
+         (node/keyword-is? (node/keyword-literal :/) :/)
+         (loop [index 0]
+           (if (>= index (vector-count all)) true
+             (let [op (catalog/shape-operation (typed-list-nth [:list [:ref :mir.catalog/shape]] all index))
+                   value (node/keyword-literal op)]
+               (and (node/keyword-is? value op) (node/same-name? value (node/keyword-literal op))
+                    (not (node/keyword-is? value :missing)) (recur (+ index 1)))))))))
 (defn main [] :i64
   (let [runtime (catalog/runtime-context-offsets) capability (catalog/capability-context-offsets)]
     (cond
@@ -137,4 +171,5 @@
                 (= (vector-count (catalog/kernel-dequant-dot-operations)) 8)
                 (gmir-catalog/keyword-member? (catalog/kernel-atomic-ops) :mir/kernel-cmpxchg-u64)
                 (gmir-catalog/keyword-member? (catalog/kernel-dequant-dot-operations) :mir/kernel-dequant-dot-ptq1-0))) 6
-      (not (pools?)) 7 (not (scans?)) 8 (not (refusal-adapter?)) 9 :else 0)))
+      (not (pools?)) 7 (not (scans?)) 8 (not (refusal-adapter?)) 9 (not (keyword-comparison?)) 10
+      (not (lookup-equivalence?)) 11 :else 0)))

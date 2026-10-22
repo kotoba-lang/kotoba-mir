@@ -6,29 +6,29 @@
             [kotoba.mir.outcome :as outcome]))
 
 (defn- named? [value [:ref :gmir.node/value] expected :keyword] :bool
-  (node/same-name? value (node/keyword-literal expected)))
+  (arena-scope (node/keyword-is? value expected)))
 (defn- member? [values [:list :keyword] value [:ref :gmir.node/value]] :bool
-  (loop [index 0]
+  (arena-scope (loop [index 0]
     (if (>= index (vector-count values)) false
-      (if (named? value (typed-list-nth [:list :keyword] values index)) true (recur (+ index 1))))))
+      (if (named? value (typed-list-nth [:list :keyword] values index)) true (recur (+ index 1)))))))
 (defn- bank [table [:list [:ref :mir.catalog/bank]] target :keyword] [:list :keyword]
-  (option-value-of [:option [:list :keyword]] (catalog/registers-for table target :all) (typed-list-new [:list :keyword])))
+  (option-match [:option [:list :keyword]] (catalog/registers-for table target :all) (typed-list-new [:list :keyword]) found-value found-value))
 (defn physical-register? [target :keyword value [:ref :gmir.node/value]] :bool
-  (and (= (node/kind value) :keyword)
+  (arena-scope (and (= (node/kind value) :keyword)
        (or (member? (bank (catalog/physical-registers) target) value)
            (member? (bank (catalog/leaf-registers) target) value)
            (member? (bank (catalog/preserved-registers) target) value)
-           (member? (bank (catalog/call-argument-registers) target) value))))
+           (member? (bank (catalog/call-argument-registers) target) value)))))
 (defn- collection? [value [:ref :gmir.node/value]] :bool
-  (let [kind (node/kind value)]
-    (or (= kind :map) (= kind :set) (= kind :vector) (= kind :list))))
+  (arena-scope (let [kind (node/kind value)]
+    (or (= kind :map) (= kind :set) (= kind :vector) (= kind :list)))))
 (defn- contains-register? [value [:ref :gmir.node/value] register :keyword] :bool
-  (if (named? value register) true
+  (arena-scope (if (named? value register) true
     (if (not (collection? value)) false
       (loop [index 0]
         (if (>= index (node/child-count value)) false
-          (let [child (option-value-of [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value))]
-            (if (contains-register? child register) true (recur (+ index 1)))))))))
+          (let [child (option-match [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value) item item)]
+            (if (contains-register? child register) true (recur (+ index 1))))))))))
 (defn saved-registers [target :keyword instructions [:ref :gmir.node/value]]
   [:result [:list :keyword] [:ref :mir/refusal]]
   (let [kind (node/kind instructions)]

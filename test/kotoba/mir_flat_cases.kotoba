@@ -7,7 +7,7 @@
             [kotoba.mir.outcome :as outcome]))
 
 (defn- at [value [:ref :gmir.node/value] index :i64] [:ref :gmir.node/value]
-  (option-value-of [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value)))
+  (option-match [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value) item item))
 (defn- kw [value :keyword] [:ref :gmir.node/value] (node/keyword-literal value))
 (defn- named? [value [:ref :gmir.node/value] expected :keyword] :bool (node/same-name? value (kw expected)))
 (defn- function-name [] [:ref :gmir.node/value]
@@ -30,14 +30,15 @@
 (defn- single [version :i64 target :keyword virtual :bool value [:ref :gmir.node/value]] [:ref :gmir.node/value]
   (program version target virtual (node/append (node/empty-vector) value)))
 (defn- accepted? [value [:ref :gmir.node/value]] :bool
-  (result-ok?-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] (flat/validate! value)))
+  (arena-scope (result-ok?-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] (flat/validate! value))))
 (defn- refusal [value [:ref :gmir.node/value]] [:ref :mir/refusal]
   (result-error-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] (flat/validate! value)
     (outcome/refusal :unexpected-success value)))
 (defn- rejected? [value [:ref :gmir.node/value] expected :keyword] :bool
-  (let [error (refusal value)]
-    (and (= (outcome/phase error) :mir) (= (outcome/problem error) expected)
-         (string=? (outcome/message error) (string-concat "MIR rejected: " (keyword-name expected))))))
+  (arena-scope
+    (let [error (refusal value)]
+      (and (= (outcome/phase error) :mir) (= (outcome/problem error) expected)
+           (string=? (outcome/message error) (string-concat "MIR rejected: " (keyword-name expected)))))))
 (defn- field [op :keyword target :keyword name :keyword] [:ref :gmir.node/value]
   (cond
     (= name :mir/op) (kw op)

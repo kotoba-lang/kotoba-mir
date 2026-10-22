@@ -20,11 +20,11 @@
 (defn live-in [analysis [:ref :mir.cfg/live]] [:ref :mir.table/tree] (record-get [:ref :mir.cfg/live] analysis :in))
 (defn live-out [analysis [:ref :mir.cfg/live]] [:ref :mir.table/tree] (record-get [:ref :mir.cfg/live] analysis :out))
 (defn- terminator? [instruction [:ref :gmir.node/value]] :bool
-  (or (data/op? instruction :mir/jump) (data/op? instruction :mir/branch-zero)
-      (data/op? instruction :mir/branch-nonzero) (data/op? instruction :mir/return)))
+  (arena-scope (or (data/op? instruction :mir/jump) (data/op? instruction :mir/branch-zero)
+      (data/op? instruction :mir/branch-nonzero) (data/op? instruction :mir/return))))
 (defn- conditional? [instruction [:ref :gmir.node/value]] :bool
-  (or (data/op? instruction :mir/branch-zero) (data/op? instruction :mir/branch-nonzero)))
-(defn- field [value [:ref :gmir.node/value] key :keyword] :i64 (node/number (node/key value key)))
+  (arena-scope (or (data/op? instruction :mir/branch-zero) (data/op? instruction :mir/branch-nonzero))))
+(defn- field [value [:ref :gmir.node/value] key :keyword] :i64 (arena-scope (node/number (node/key value key))))
 (defn- basic-blocks [instructions [:ref :gmir.node/value]] [:ref :gmir.node/value]
   (let [n (node/child-count instructions)
         leaders (loop [index 0 out (data/include (table/empty) (table/index-key 0))]
@@ -69,12 +69,12 @@
 (defn- universe [n :i64] [:ref :mir.table/tree]
   (loop [index 0 out (table/empty)] (if (>= index n) out (recur (+ index 1) (data/include out (table/index-key index))))))
 (defn- same-sets? [left [:ref :mir.table/tree] right [:ref :mir.table/tree] count :i64] :bool
-  (loop [index 0]
+  (arena-scope (loop [index 0]
     (if (>= index count) true
       (if (data/same-set? (data/members left (table/index-key index)) (data/members right (table/index-key index)))
-        (recur (+ index 1)) false))))
+        (recur (+ index 1)) false)))))
 (defn dominates? [analysis [:ref :mir.cfg/dominance] dominator :i64 index :i64] :bool
-  (data/member? (data/members (dominators analysis) (table/index-key index)) (table/index-key dominator)))
+  (arena-scope (data/member? (data/members (dominators analysis) (table/index-key index)) (table/index-key dominator))))
 (defn dominance [flow [:ref :mir.cfg/flow]] [:ref :mir.cfg/dominance]
   (let [n (node/child-count (blocks flow)) all (universe n) entry (data/include (table/empty) (table/index-key 0))
         initial (loop [index 0 out (table/empty)]

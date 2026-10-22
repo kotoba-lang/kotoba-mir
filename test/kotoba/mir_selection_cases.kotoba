@@ -6,7 +6,7 @@
             [kotoba.mir.outcome :as outcome] [kotoba.mir-module-cases :as check]))
 
 (defn- at [value [:ref :gmir.node/value] index :i64] [:ref :gmir.node/value]
-  (option-value-of [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value)))
+  (option-match [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value) item item))
 (defn- kw [value :keyword] [:ref :gmir.node/value] (node/keyword-literal value))
 (defn- named? [value [:ref :gmir.node/value] key :keyword] :bool (node/same-name? value (kw key)))
 (defn- v [index :i64] [:ref :gmir.node/value]
@@ -72,16 +72,18 @@
       (node/put-key :mir/entry (sym "f")) (node/put-key :mir/functions (node/append (node/empty-vector)
         (-> (node/empty-map) (node/put-key :mir/name (sym "f")) (node/put-key :mir/arity (node/i64-value 1)) (node/put-key :mir/instructions code))))))
 (defn- pass=? [target :keyword program [:ref :gmir.node/value] expected [:ref :gmir.node/value]] :bool
+  (arena-scope
   (let [result (selection/select-target (kw target) program)]
     (and (result-ok?-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] result)
-         (check/same-value? (result-value-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] result (node/nil-value)) expected))))
+         (check/same-value? (result-value-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] result (node/nil-value)) expected)))))
 (defn- refusal=? [target [:ref :gmir.node/value] program [:ref :gmir.node/value] phase :keyword problem :keyword data [:ref :gmir.node/value]] :bool
+  (arena-scope
   (let [result (selection/select-target target program)
         error (result-error-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] result (outcome/refusal :unexpected-success program))]
     (and (not (result-ok?-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] result))
          (= (outcome/phase error) phase) (= (outcome/problem error) problem)
          (string=? (outcome/message error) (string-concat (if (= phase :gmir) "GMIR rejected: " "MIR rejected: ") (keyword-name problem)))
-         (check/same-value? (outcome/instruction error) data))))
+         (check/same-value? (outcome/instruction error) data)))))
 (defn- default-field [op :keyword key :keyword] [:ref :gmir.node/value]
   (cond (= key :gmir/op) (kw op) (or (= key :gmir/id) (= key :gmir/target)) (kw :case/target)
     (or (= key :gmir/function) (= key :gmir/callee)) (sym "f")
@@ -111,6 +113,7 @@
         (or (= op :gmir/jump) (= op :gmir/branch-zero)) (-> (node/empty-vector) (node/append (label :case/target)) (node/append value))
         :else (node/append (node/empty-vector) value)))
 (defn- all-rows? [target :keyword] :bool
+  (arena-scope
   (let [rows (gmir-catalog/instruction-keysets)]
     (and (= (vector-count rows) 92)
          (loop [index 0]
@@ -124,15 +127,17 @@
                               refused (refusal=? (kw target) program :mir :x86-simd-target-mismatch
                                 (-> (node/empty-map) (node/put-key :target (kw target)) (node/put-key :operations (node/append (node/empty-vector) (kw op)))))
                               :else (pass=? target program (expected-module target (converted-code code))))]
-               (if good (recur (+ index 1)) false)))))))
+               (if good (recur (+ index 1)) false))))))))
 (defn- first-refusal? [] :bool
+  (arena-scope
   (let [missing (node/nil-value) unsupported (node/i64-value 7)
         bad (constant 0 (node/f64-bits-value 0x7ff8000000000001))]
     (and (refusal=? unsupported missing :mir :unsupported-target (node/put-key (node/empty-map) :target unsupported))
          (refusal=? (kw :unknown) missing :mir :unsupported-target (node/put-key (node/empty-map) :target (kw :unknown)))
          (refusal=? (kw :aarch64) missing :gmir :non-canonical-program missing)
-         (refusal=? (kw :aarch64) (module (node/append (node/empty-vector) bad)) :gmir :constant-not-i64 bad))))
+         (refusal=? (kw :aarch64) (module (node/append (node/empty-vector) bad)) :gmir :constant-not-i64 bad)))))
 (defn- division? [value [:ref :gmir.node/value] shared :bool flat-version :i64] :bool
+  (arena-scope
   (let [constant (constant 1 value) quotient (binary :gmir/quotient 2 0 1)
         code (-> (node/empty-vector) (node/append (argument)) (node/append constant) (node/append quotient))
         whole (if shared (-> code (node/append (binary :gmir/add 3 2 1)) (node/append (ret 3))) (node/append code (ret 2)))
@@ -146,7 +151,7 @@
                               (pass=? :aarch64 (module whole) (expected-module :aarch64 optimized)))
       (let [expected (-> (node/empty-map) (node/put-key :mir/version (node/i64-value flat-version)) (node/put-key :mir/target (kw :x86-64))
                         (node/put-key :mir/registers (kw :virtual)) (node/put-key :mir/instructions ordinary))]
-        (pass=? :x86-64 (flat flat-version whole) expected)))))
+        (pass=? :x86-64 (flat flat-version whole) expected))))))
 (defn- zero-code [zero [:ref :gmir.node/value] reversed :bool reused :bool interrupted :bool] [:ref :gmir.node/value]
   (let [equal (if reversed (binary :gmir/equal 2 1 0) (binary :gmir/equal 2 0 1))
         branch (-> (ins :gmir/branch-zero) (node/put-key :gmir/test (v 2)) (node/put-key :gmir/target (kw :case/nonzero)))
@@ -155,14 +160,16 @@
         suffix (-> broken (node/append branch) (node/append (ret 0)) (node/append (label :case/nonzero)) (node/append (ret 0)))]
     (if reused (node/append suffix (binary :gmir/add 3 0 1)) suffix)))
 (defn- zero-fusion? [zero [:ref :gmir.node/value] fuse :bool reversed :bool reused :bool interrupted :bool] :bool
+  (arena-scope
   (let [code (zero-code zero reversed reused interrupted) original (converted-code code)
         fused (-> (node/empty-vector) (node/append (at original 0))
                   (node/append (-> (node/empty-map) (node/put-key :mir/op (kw :mir/branch-nonzero))
                     (node/put-key :mir/test (v 0)) (node/put-key :mir/target (kw :case/nonzero))))
                   (node/append (at original 4)) (node/append (at original 5)) (node/append (at original 6)))]
     (and (pass=? :x86-64 (module code) (expected-module :x86-64 original))
-         (pass=? :aarch64 (module code) (expected-module :aarch64 (if fuse fused original))))))
+         (pass=? :aarch64 (module code) (expected-module :aarch64 (if fuse fused original)))))))
 (defn- phi-global-use? [result :bool] :bool
+  (arena-scope
   (let [branch (-> (ins :gmir/branch-zero) (node/put-key :gmir/test (v 2)) (node/put-key :gmir/target (kw :case/else)))
         values (-> (node/empty-vector) (node/append (incoming :case/then (v (if result 2 1)))) (node/append (incoming :case/else (v 0))))
         phi (-> (ins :gmir/phi) (node/put-key :gmir/dst (v 3)) (node/put-key :gmir/incomings values))
@@ -171,8 +178,9 @@
                  (node/append (label :case/then)) (node/append (jump :case/join))
                  (node/append (label :case/else)) (node/append (jump :case/join)) (node/append (label :case/join))
                  (node/append phi) (node/append (ret 3)))]
-    (pass=? :aarch64 (module code) (expected-module :aarch64 (converted-code code)))))
+    (pass=? :aarch64 (module code) (expected-module :aarch64 (converted-code code))))))
 (defn- zero-negative-guards? [] :bool
+  (arena-scope
   (let [base (zero-code (node/i64-value 0) false false false)
         both (binary :gmir/equal 2 1 1) alias (binary :gmir/equal 2 2 1)
         nil-operand (node/put-key (binary :gmir/equal 2 0 1) :gmir/left (node/nil-value))]
@@ -186,8 +194,9 @@
                                            (and (= index 3) (= case 3)) (node/put-key value :gmir/test (v 3))
                                            (and (= index 2) (= case 4)) (binary :gmir/less-than 2 0 1) :else value)]
                          (recur (+ index 1) (node/append out updated)))))]
-          (if (pass=? :aarch64 (module code) (expected-module :aarch64 (converted-code code))) (recur (+ case 1)) false))))))
+          (if (pass=? :aarch64 (module code) (expected-module :aarch64 (converted-code code))) (recur (+ case 1)) false)))))))
 (defn- guard-order-and-data? [] :bool
+  (arena-scope
   (let [rows (gmir-catalog/instruction-keysets)
         q4 (loop [index 0 out (node/nil-value)]
              (if (>= index (vector-count rows)) out
@@ -209,7 +218,7 @@
              (-> (node/empty-vector) (node/append (kw :gmir/kernel-dequant-dot-q6-k)) (node/append (kw :gmir/kernel-dequant-dot-q4-k))))))
          (refusal=? target combined :mir :x86-privileged-target-mismatch
            (-> (node/empty-map) (node/put-key :target target) (node/put-key :actions
-             (-> (node/empty-vector) (node/append (kw :boot-info)) (node/append (kw :read-cr3)) (node/append (kw :boot-info)))))))))
+             (-> (node/empty-vector) (node/append (kw :boot-info)) (node/append (kw :read-cr3)) (node/append (kw :boot-info))))))))))
 (defn main [] :i64
   (cond (not (and (all-rows? :x86-64) (all-rows? :aarch64))) 1 (not (first-refusal?)) 2
         (not (and (division? (node/i64-value 2147483647) false 3) (division? (node/integer-value (node/string-text "-9223372036854775808")) false 3)

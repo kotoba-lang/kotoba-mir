@@ -8,7 +8,7 @@
             [kotoba.mir.flat :as flat] [kotoba.mir.outcome :as outcome]))
 (defn- ins [op :keyword] [:ref :gmir.node/value] (node/put-key (node/empty-map) :mir/op (node/keyword-literal op)))
 (defn- bank [target :keyword banks [:list [:ref :mir.catalog/bank]] kind :keyword] [:ref :gmir.node/value]
-  (let [values (option-value-of [:option [:list :keyword]] (catalog/registers-for banks target kind) (typed-list-new [:list :keyword]))]
+  (let [values (option-match [:option [:list :keyword]] (catalog/registers-for banks target kind) (typed-list-new [:list :keyword]) found-value found-value)]
     (loop [index 0 out (node/empty-vector)]
       (if (>= index (vector-count values)) out
         (recur (+ index 1) (node/append out (node/keyword-literal (typed-list-nth [:list :keyword] values index))))))))
@@ -31,7 +31,7 @@
           :else (-> dst (node/put-key :mir/capability (node/key instruction :mir/capability)) (node/put-key :mir/kind (node/key instruction :mir/kind))
                        (node/put-key :mir/context-offset (node/key instruction :mir/context-offset))))))
 (defn- binary? [op [:ref :gmir.node/value]] :bool
-  (or (data/named? op :mir/add) (data/named? op :mir/subtract) (data/named? op :mir/multiply) (data/named? op :mir/quotient)
+  (arena-scope (or (data/named? op :mir/add) (data/named? op :mir/subtract) (data/named? op :mir/multiply) (data/named? op :mir/quotient)
       (data/named? op :mir/bit-and) (data/named? op :mir/bit-or) (data/named? op :mir/bit-xor)
       (data/named? op :mir/shift-left) (data/named? op :mir/shift-right-signed) (data/named? op :mir/shift-right-unsigned)
       (data/named? op :mir/f64-add) (data/named? op :mir/f64-subtract) (data/named? op :mir/f64-multiply) (data/named? op :mir/f64-divide)
@@ -41,24 +41,24 @@
       (data/named? op :mir/f32-equal) (data/named? op :mir/f32-less-than) (data/named? op :mir/f32-less-or-equal)
       (data/named? op :mir/f32-greater-than) (data/named? op :mir/f32-greater-or-equal) (data/named? op :mir/f32-unordered)
       (data/named? op :mir/equal) (data/named? op :mir/less-than) (data/named? op :mir/greater-than)
-      (data/named? op :mir/less-or-equal) (data/named? op :mir/greater-or-equal)))
+      (data/named? op :mir/less-or-equal) (data/named? op :mir/greater-or-equal))))
 (defn- unary? [op [:ref :gmir.node/value]] :bool
-  (or (data/named? op :mir/f64-sqrt) (data/named? op :mir/f32-sqrt) (data/named? op :mir/f32-to-f64)
-      (data/named? op :mir/f64-to-f32) (data/named? op :mir/i64-to-f32) (data/named? op :mir/i64-to-f64)))
+  (arena-scope (or (data/named? op :mir/f64-sqrt) (data/named? op :mir/f32-sqrt) (data/named? op :mir/f32-to-f64)
+      (data/named? op :mir/f64-to-f32) (data/named? op :mir/i64-to-f32) (data/named? op :mir/i64-to-f64))))
 (defn- load? [op [:ref :gmir.node/value]] :bool
-  (or (data/named? op :mir/kernel-load-u8) (data/named? op :mir/kernel-load-u16) (data/named? op :mir/kernel-load-u32) (data/named? op :mir/kernel-load-u64)
+  (arena-scope (or (data/named? op :mir/kernel-load-u8) (data/named? op :mir/kernel-load-u16) (data/named? op :mir/kernel-load-u32) (data/named? op :mir/kernel-load-u64)
       (data/named? op :mir/slice-load-u8) (data/named? op :mir/slice-load-u16) (data/named? op :mir/slice-load-u32) (data/named? op :mir/slice-load-u64)
-      (data/named? op :mir/kernel-try-lock-u32) (data/named? op :mir/kernel-unlock-u32)))
+      (data/named? op :mir/kernel-try-lock-u32) (data/named? op :mir/kernel-unlock-u32))))
 (defn- store? [op [:ref :gmir.node/value]] :bool
-  (or (data/named? op :mir/kernel-store-u8) (data/named? op :mir/kernel-store-u16) (data/named? op :mir/kernel-store-u32) (data/named? op :mir/kernel-store-u64)
-      (data/named? op :mir/slice-store-u8) (data/named? op :mir/slice-store-u16) (data/named? op :mir/slice-store-u32) (data/named? op :mir/slice-store-u64)))
+  (arena-scope (or (data/named? op :mir/kernel-store-u8) (data/named? op :mir/kernel-store-u16) (data/named? op :mir/kernel-store-u32) (data/named? op :mir/kernel-store-u64)
+      (data/named? op :mir/slice-store-u8) (data/named? op :mir/slice-store-u16) (data/named? op :mir/slice-store-u32) (data/named? op :mir/slice-store-u64))))
 (defn- atomic? [op [:ref :gmir.node/value]] :bool
-  (or (data/named? op :mir/kernel-atomic-add-u32) (data/named? op :mir/kernel-atomic-add-u64)
-      (data/named? op :mir/kernel-xchg-u32) (data/named? op :mir/kernel-xchg-u64)))
-(defn- compare-exchange? [op [:ref :gmir.node/value]] :bool (or (data/named? op :mir/kernel-cmpxchg-u32) (data/named? op :mir/kernel-cmpxchg-u64)))
+  (arena-scope (or (data/named? op :mir/kernel-atomic-add-u32) (data/named? op :mir/kernel-atomic-add-u64)
+      (data/named? op :mir/kernel-xchg-u32) (data/named? op :mir/kernel-xchg-u64))))
+(defn- compare-exchange? [op [:ref :gmir.node/value]] :bool (arena-scope (or (data/named? op :mir/kernel-cmpxchg-u32) (data/named? op :mir/kernel-cmpxchg-u64))))
 (defn- dot? [op [:ref :gmir.node/value]] :bool
-  (or (data/named? op :mir/kernel-dot-f32) (data/named? op :mir/kernel-dequant-dot-q8-0)
-      (data/named? op :mir/kernel-dequant-dot-q4-k) (data/named? op :mir/kernel-dequant-dot-q6-k)))
+  (arena-scope (or (data/named? op :mir/kernel-dot-f32) (data/named? op :mir/kernel-dequant-dot-q8-0)
+      (data/named? op :mir/kernel-dequant-dot-q4-k) (data/named? op :mir/kernel-dequant-dot-q6-k))))
 (defn- fields [a :keyword b :keyword c :keyword d :keyword e :keyword count :i64] [:list :keyword]
   (loop [index 0 out (typed-list-new [:list :keyword])]
     (if (>= index count) out

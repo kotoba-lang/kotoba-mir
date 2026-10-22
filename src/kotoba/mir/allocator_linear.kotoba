@@ -20,7 +20,7 @@
 (defn- positions [state [:ref :mir.linear/state]] [:ref :mir.table/tree] (record-get [:ref :mir.linear/state] state :positions))
 (defn- state-data [state [:ref :mir.linear/state]] [:ref :gmir.node/value] (record-get [:ref :mir.linear/state] state :data))
 (defn- part [state [:ref :mir.linear/state] key :keyword] [:ref :gmir.node/value] (node/key (state-data state) key))
-(defn- number [state [:ref :mir.linear/state] key :keyword] :i64 (node/number (part state key)))
+(defn- number [state [:ref :mir.linear/state] key :keyword] :i64 (arena-scope (node/number (part state key))))
 (defn- with-part [state [:ref :mir.linear/state] key :keyword value [:ref :gmir.node/value]] [:ref :mir.linear/state]
   (record-new [:ref :mir.linear/state] (assigned state) (backed state) (positions state) (node/put-key (state-data state) key value)))
 (defn- with-number [state [:ref :mir.linear/state] key :keyword value :i64] [:ref :mir.linear/state] (with-part state key (node/i64-value value)))
@@ -37,7 +37,7 @@
 (defn- fail [problem :keyword value [:ref :gmir.node/value]] [:result [:ref :mir.linear/state] [:ref :mir/refusal]]
   (result-err-of [:result [:ref :mir.linear/state] [:ref :mir/refusal]] (outcome/refusal problem value)))
 (defn- ok? [result [:result [:ref :mir.linear/state] [:ref :mir/refusal]]] :bool
-  (result-ok?-of [:result [:ref :mir.linear/state] [:ref :mir/refusal]] result))
+  (arena-scope (result-ok?-of [:result [:ref :mir.linear/state] [:ref :mir/refusal]] result)))
 (defn- value [result [:result [:ref :mir.linear/state] [:ref :mir/refusal]]] [:ref :mir.linear/state]
   (result-value-of [:result [:ref :mir.linear/state] [:ref :mir/refusal]] result (empty-state)))
 (defn- emit [state [:ref :mir.linear/state] instruction [:ref :gmir.node/value]] [:ref :mir.linear/state]
@@ -46,9 +46,9 @@
   (with-part state :out (data/append-all (part state :out) instructions)))
 (defn- ins [op :keyword] [:ref :gmir.node/value] (node/put-key (node/empty-map) :mir/op (node/keyword-literal op)))
 (defn- call? [instruction [:ref :gmir.node/value]] :bool
-  (or (data/op? instruction :mir/call) (data/op? instruction :mir/tail-call) (data/op? instruction :mir/runtime-call) (data/op? instruction :mir/capability-call)))
+  (arena-scope (or (data/op? instruction :mir/call) (data/op? instruction :mir/tail-call) (data/op? instruction :mir/runtime-call) (data/op? instruction :mir/capability-call))))
 (defn- bank [target :keyword banks [:list [:ref :mir.catalog/bank]]] [:ref :gmir.node/value]
-  (let [list (option-value-of [:option [:list :keyword]] (catalog/registers-for banks target :all) (typed-list-new [:list :keyword]))]
+  (let [list (option-match [:option [:list :keyword]] (catalog/registers-for banks target :all) (typed-list-new [:list :keyword]) found-value found-value)]
     (loop [index 0 out (node/empty-vector)]
       (if (>= index (vector-count list)) out (recur (+ index 1) (node/append out (node/keyword-literal (typed-list-nth [:list :keyword] list index))))))))
 (defn- set-of [values [:ref :gmir.node/value]] [:ref :mir.table/tree]
@@ -107,9 +107,9 @@
                             (with-assigned (table/remove (assigned state) key)) (with-part :free (node/append (part state :free) register)))]
           (if existing (ok next) (store-at-definition next key register slot)))))))
 (defn- next-use [indexes [:ref :mir.table/tree] key [:ref :mir.table/key] index :i64] :i64
-  (let [uses (data/lookup indexes key)]
+  (arena-scope (let [uses (data/lookup indexes key)]
     (loop [cursor 0]
-      (cond (>= cursor (node/child-count uses)) -1 (>= (node/number (data/at uses cursor)) index) (node/number (data/at uses cursor)) :else (recur (+ cursor 1))))))
+      (cond (>= cursor (node/child-count uses)) -1 (>= (node/number (data/at uses cursor)) index) (node/number (data/at uses cursor)) :else (recur (+ cursor 1)))))))
 (defn- furthest [env [:ref :mir.linear/env] state [:ref :mir.linear/state] protected [:ref :mir.table/tree]] [:option [:ref :mir.table/key]]
   (let [all (assigned state) indexes (record-get [:ref :mir.linear/env] env :indexes) position (number state :index)]
     (loop [index 0 best (option-none-of [:option [:ref :mir.table/key]]) best-use -1]
@@ -125,7 +125,7 @@
           (> (node/child-count b) 0) (ok (-> state (with-part secondary (data/slice b 1 (node/child-count b))) (with-part :taken-register (data/at b 0))))
           :else (let [victim (furthest env state protected)]
             (if (not (option-some?-of [:option [:ref :mir.table/key]] victim)) (fail :spill-required instruction)
-              (let [key (option-value-of [:option [:ref :mir.table/key]] victim (table/nil-key)) register (data/lookup (assigned state) key)
+              (let [key (option-match [:option [:ref :mir.table/key]] victim (table/nil-key) found-value found-value) register (data/lookup (assigned state) key)
                     spilled (spill-assigned state key instruction)]
                 (if (not (ok? spilled)) spilled
                   (let [next (value spilled) free (part next :free)]
@@ -140,8 +140,8 @@
                       (call? (data/at code cursor)) true :else (recur (+ cursor 1)))))]
         (recur (+ index 1) (if crosses (data/include out key) out))))))
 (defn- prefix-count [code [:ref :gmir.node/value]] :i64
-  (loop [index 0]
-    (if (and (< index (node/child-count code)) (data/op? (data/at code index) :mir/argument)) (recur (+ index 1)) index)))
+  (arena-scope (loop [index 0]
+    (if (and (< index (node/child-count code)) (data/op? (data/at code index) :mir/argument)) (recur (+ index 1)) index))))
 (defn- entry-plan [env [:ref :mir.linear/env] merge-slots :i64 preserved-values [:ref :mir.table/tree]]
   [:result [:ref :mir.linear/state] [:ref :mir/refusal]]
   (let [code (record-get [:ref :mir.linear/env] env :code) pool (record-get [:ref :mir.linear/env] env :pool)
@@ -217,11 +217,11 @@
                                          (= (node/number (data/at uses 0)) position))
                 (data/put-data out key (data/at homes index)) out)))))))))
 (defn- control? [instruction [:ref :gmir.node/value]] :bool
-  (or (call? instruction) (data/op? instruction :mir/label) (data/op? instruction :mir/jump) (data/op? instruction :mir/branch-zero)
-      (data/op? instruction :mir/branch-nonzero) (data/op? instruction :mir/return) (data/op? instruction :mir/recur) (data/op? instruction :mir/reentry)))
+  (arena-scope (or (call? instruction) (data/op? instruction :mir/label) (data/op? instruction :mir/jump) (data/op? instruction :mir/branch-zero)
+      (data/op? instruction :mir/branch-nonzero) (data/op? instruction :mir/return) (data/op? instruction :mir/recur) (data/op? instruction :mir/reentry))))
 (defn- straight-to-recur? [code [:ref :gmir.node/value] index :i64 recur-index :i64] :bool
-  (loop [cursor (+ index 1)]
-    (cond (>= cursor recur-index) true (control? (data/at code cursor)) false :else (recur (+ cursor 1)))))
+  (arena-scope (loop [cursor (+ index 1)]
+    (cond (>= cursor recur-index) true (control? (data/at code cursor)) false :else (recur (+ cursor 1))))))
 (defn- pin-copies [state [:ref :mir.linear/state] copies [:ref :mir.phi/copies] temp-slot :i64] [:ref :mir.linear/state]
   (let [used (= (node/number (part state :used-temp?)) 1) now (phi/used-temp? copies)]
     (-> state (emit-all (phi/instructions copies)) (with-number :next-slot (+ (number state :next-slot) (if (and now (not used)) 1 0)))
@@ -324,7 +324,7 @@
       :else
       (let [protected (data/source-set instruction) preserved (data/member? (record-get [:ref :mir.linear/env] env :crossing) key)
             desired (data/lookup (record-get [:ref :mir.linear/env] env :recur-homes) key) owner (home-owner all desired)
-            owner-key (option-value-of [:option [:ref :mir.table/key]] owner (table/nil-key))
+            owner-key (option-match [:option [:ref :mir.table/key]] owner (table/nil-key) found-value found-value)
             recur-use (node/number (data/at (data/lookup (record-get [:ref :mir.linear/env] env :indexes) key) 0))
             direct (and (not= (node/kind desired) :nil) (schedule/schedulable? instruction)
                         (straight-to-recur? (record-get [:ref :mir.linear/env] env :code) index recur-use)
@@ -374,7 +374,7 @@
                 emitted (emit current (physical-instruction instruction (assigned current)))
                 expired (expire-at env emitted (number current :index) dst true)]
             (ok (if (identity/vreg? dst) (with-positions expired (data/put-number (positions expired) (operands/key-of dst) (node/child-count (part emitted :out)))) expired))))))))
-(defn- flag? [flags [:ref :gmir.node/value] key :keyword] :bool (= (node/number (node/key flags key)) 1))
+(defn- flag? [flags [:ref :gmir.node/value] key :keyword] :bool (arena-scope (= (node/number (node/key flags key)) 1)))
 (defn- flags [code [:ref :gmir.node/value] current [:ref :gmir.node/value]] [:ref :gmir.node/value]
   (loop [index 0 out (node/empty-map)]
     (if (>= index (node/child-count code)) out

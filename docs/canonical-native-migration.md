@@ -270,62 +270,61 @@ Eight self-check component sources and an aggregate are present:
   `large-main` calls both module large entries plus table/dependency/countdown
   large entries plus allocator pressure, and returns only an i64 status.
 
-All entries are **uncompiled and unexecuted**. They are not registered as a
-replacement CI and do not replace the full upstream positive/refusal,
-authority, allocation, fuel, stack, cleanup and large-input corpus.
+## Native selfhost execution (2026-10-23)
 
-Limited source-data inspection compares every literal table row against the
-pinned Git data and reads source forms for imports/arity, schema/record use,
-type positions, lexical names and forbidden host forms. It checks that all 30
-reference flat refusal names remain present. It does not execute MIR, GMIR,
-the compiler, a generator, an oracle, or tests, and is not the owning EDN reader
-or a typechecker. The same inspection checks the 11 module refusal names and
-all 87 backed-value operations against the owning reference; those inventories
-are not proof of condition equivalence or runtime parity. It also compares all
-30 selector field mappings, the 16 ordered direct source fields and the 14
-schedulable operations against the pinned owning data.
-The counted proof's complete 19-operation pure set is also compared as literal
-source data; that inventory does not prove the proof's conditions equivalent.
+The whole canonical root, all 29 original public names, counted proof, full
+allocator policies, selection, validation and scheduling are linked together
+with seven canonical GMIR production units. The 33 source inputs and all three
+source roots are checked with an exact KSL1 SHA-256 source manifest. The native
+compiler checks, compiles and links that closure without `--unpinned`, reduced
+roots, a C loader or a hosted semantic materializer.
 
-No qualified independent compiler ELF entry has been established for this
-candidate. Native execution is authorized; the compiler entry is the missing
-prerequisite. A raw seed requiring a C loader, a hand-written ELF probe or a
-host-backed wrapper cannot supply it. Native reader/admission, compilation,
-all positive/refusal/authority/resource execution, whole native self-rebuild
-and fixed point, owning main/lock/CID integration and native CDCI gate/controller
-qualification remain open. Static source inspection does not close any of
-these gates.
+The ordinary aggregate calls all eight components and exits zero. Individual
+large entries also exit zero: 16,385-instruction module validation, 16,385-move
+reentry, 16,385-entry AVL invariants, 16,385-reader dependency fan-in, 16,385
+distinct counted-proof instructions and both-target 128-value allocator
+pressure. The all-large aggregate is checked separately in the exact receipt.
+These tests preserve the original guest allocator limits and all cases.
 
-An actual native bootstrap check was attempted with the experimental FS2
-AArch64 ELF SHA-256
-`b4ff2578e7643346c533446bb3a1df1819c22fa71f8389df2da0cbc121338809`.
-The aggregate and all MIR test/production and GMIR source paths were supplied.
-The existing VM could stat the input, but the compiler returned exit 1,
-`seed: E3 cannot read input file`, before MIR admission; the worktree is outside
-that experiment's configured filesystem scope. The same ELF checked its
-existing in-scope 57-byte smoke source with exit 0 and `ok`. Neither result is
-MIR compilation or suite execution. No scope, lock, seal, profile or public
-wrapper was relaxed. The ELF sidecar still labels its initial IR materializer
-as a temporary Python calculator outside the accepted build closure; that
-calculator was not run for this MIR work. Native process tracing remains open
-(the existing VM has no `strace`). A separately reproduced, smaller historical
-root is a different source snapshot and does not qualify this current source
-closure through its fixed-point receipt.
+Resource fixes reclaim only scalar-result temporaries. Reference-returning
+functions retain their allocations. Optional fallbacks are lazy, keyword/map
+lookups reclaim their printed comparison data, and immutable empty graph
+values are shared within one construction. Pending scheduler readers use
+paged sequences; WAR consumption and final ordered graph construction produce
+the same persistent AVL sets without retaining every intermediate path copy.
+RAW/WAR/WAW, duplicate-source and read-before-write ordering remain covered.
+Counted large fixtures share immutable literals and compare all 16,385
+constructed instructions with the original construction before proving them.
+The x86 fixture now checks the owning refusal for AArch64-only branch-nonzero;
+positive counted modules use AArch64, and x86 direct reentry uses branch-zero.
 
-A second check copied all 25 MIR/test/GMIR source files (342,692 bytes) exactly
-from MIR `f450fd0ac5f4024f7e8d6edbbc44ad5b3983bc5d` and the GMIR pin above
-into a separate input-audit directory within the existing experimental scope.
-The source bytes were compared to Git, and all three source paths were kept.
-The same native ELF then returned exit 1, `E6015 a multi-module compile needs
-pinned inputs`, naming `kotoba/mir/counted.kotoba`. This reaches native project
-discovery and retains the pinned-input refusal. It is not a successful owning
-reader/typecheck or a test pass. No `--unpinned` flag, altered source, relaxed
-profile/scope/seal or lock bypass was used. The copies are experimental inputs,
-not vendored dependencies, owning-main integration or an updated resolver lock.
+The measured Amu seed successor has 18 modules. Its exact unity SHA-256 is
+`3f43340887b2b5d1ec1a1c5541ef295f75b2bceaa0d2a24d69995112d2206523`.
+G5 rebuilt G6 to byte-identical KSEED, SHA-256
+`bb94ca3692b4bf1f62fbdb3447a916aec48145dc3da3ab814e57421bd162042c`.
+The G5 ELF is `aca405b65c0313aee4b672a5c5c65839b6fe7e941aeaf957865c81da50b3843f`.
+Its native growth packager is
+`01d16edcfb23d2015c925a44796bdbcab16e87be48f77e4f007590794d064a0a`.
+G5 freshly compiled all 19 complete Embench correctness workloads and all
+exited zero with this runtime. No new performance score is claimed.
 
-The allocator/root source addition after that attempt requires a fresh complete
-immutable input snapshot and actual native check/compile/run. New rooted
-native compiler/packager generation records are being inspected separately.
-Their core/workload successes do not turn the earlier MIR pinned-input refusal
-into a successful MIR gate. This candidate has no newly established native
-type, compile, execution, authority or resource pass.
+Native runtime checks cover 600,000 scalar releases, outer-value and scalar
+preservation, depth 256, depth-257 refusal, unscoped budget refusal, persistent
+vector forks/views and region rollback, exact-size growth fallback and actual
+item-budget exhaustion. A reference cannot escape a scalar scope. Neither
+grants nor cell/vector/item budgets were increased.
+
+The initial E3 scope and E6015 missing-pin attempts are historical. Exact
+source locking and an in-scope immutable input snapshot resolve those earlier
+compile blockers. They are not current MIR prerequisites.
+
+This is an internal AAPCS64 image framed for an existing AArch64 Linux guest.
+It does not admit a public compiler target/profile/seal/CLI or the required
+x86_64-linux-static CDCI controller. Full historical corpus/caller migration,
+generic abort/recur cleanup, owning-main/resolver/Definition CID integration
+and forbidden-process trace qualification remain open. The two original
+owning suites and reference source remain byte-identical. New native cases
+do not claim that those entire historical suites have been run.
+
+Limited source-data inspections remain useful for table/refusal/field-set
+preservation, but are not native execution or proof of full condition parity.

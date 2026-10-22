@@ -1,4 +1,4 @@
-;; Uncompiled/unexecuted native self-check source. Complete upstream corpus,
+;; Native self-check source. Complete upstream corpus,
 ;; allocation/fuel/authority/resource qualification remain separate gates.
 (ns kotoba.mir-module-cases
   {:kotoba/export [main large-main large-reentry-main same-value?]}
@@ -6,7 +6,7 @@
             [kotoba.mir.validation :as validation] [kotoba.mir.outcome :as outcome]))
 
 (defn- at [value [:ref :gmir.node/value] index :i64] [:ref :gmir.node/value]
-  (option-value-of [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value)))
+  (option-match [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value) item item))
 (defn- kw [value :keyword] [:ref :gmir.node/value] (node/keyword-literal value))
 (defn- name [value :string] [:ref :gmir.node/value]
   (node/symbol-parts (option-none-of [:option [:ref :gmir.node/text]]) (node/string-text value)))

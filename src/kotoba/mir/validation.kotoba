@@ -13,21 +13,21 @@
        [:slots [:list [:ref :mir.validation/home]]]]]}))
 
 (defn- at [value [:ref :gmir.node/value] index :i64] [:ref :gmir.node/value]
-  (option-value-of [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value)))
+  (option-match [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value) item item))
 (defn- named? [value [:ref :gmir.node/value] expected :keyword] :bool
-  (node/same-name? value (node/keyword-literal expected)))
-(defn- instruction? [value [:ref :gmir.node/value] op :keyword] :bool (named? (node/key value :mir/op) op))
+  (arena-scope (node/keyword-is? value expected)))
+(defn- instruction? [value [:ref :gmir.node/value] op :keyword] :bool (arena-scope (named? (node/key value :mir/op) op)))
 (defn- kw [values [:list :keyword] key :keyword] [:list :keyword] (typed-list-conj [:list :keyword] values key))
 (defn- clean [] [:option [:ref :mir/refusal]] (option-none-of [:option [:ref :mir/refusal]]))
 (defn- failure [problem :keyword data [:ref :gmir.node/value]] [:option [:ref :mir/refusal]]
   (option-some-of [:option [:ref :mir/refusal]] (outcome/refusal problem data)))
-(defn- failed? [error [:option [:ref :mir/refusal]]] :bool (option-some?-of [:option [:ref :mir/refusal]] error))
+(defn- failed? [error [:option [:ref :mir/refusal]]] :bool (arena-scope (option-some?-of [:option [:ref :mir/refusal]] error)))
 (defn- member? [keys [:list :keyword] value [:ref :gmir.node/value]] :bool
-  (loop [index 0]
+  (arena-scope (loop [index 0]
     (if (>= index (vector-count keys)) false
-      (if (named? value (typed-list-nth [:list :keyword] keys index)) true (recur (+ index 1))))))
+      (if (named? value (typed-list-nth [:list :keyword] keys index)) true (recur (+ index 1)))))))
 (defn- fields? [value [:ref :gmir.node/value] keys [:list :keyword]] :bool
-  (and (= (node/kind value) :map) (= (node/child-count value) (* 2 (vector-count keys)))
+  (arena-scope (and (= (node/kind value) :map) (= (node/child-count value) (* 2 (vector-count keys)))
        (loop [index 0]
          (if (>= index (node/child-count value)) true
            (let [key (at value index)]
@@ -35,56 +35,56 @@
                       (loop [previous 0]
                         (if (>= previous index) true
                           (if (node/same-name? key (at value previous)) false (recur (+ previous 2))))))
-               (recur (+ index 2)) false))))))
+               (recur (+ index 2)) false)))))))
 (defn- integer=? [value [:ref :gmir.node/value] expected :i64] :bool
-  (let [n (identity/integer-i64 value)]
-    (and (option-some?-of [:option :i64] n) (= (option-value-of [:option :i64] n 0) expected))))
+  (arena-scope (let [n (identity/integer-i64 value)]
+    (and (option-some?-of [:option :i64] n) (= (option-match [:option :i64] n 0 found-value found-value) expected)))))
 (defn- same-location? [left [:ref :gmir.node/value] right [:ref :gmir.node/value]] :bool
-  (or (node/same-name? left right) (and (= (node/kind left) :nil) (= (node/kind right) :nil))
+  (arena-scope (or (node/same-name? left right) (and (= (node/kind left) :nil) (= (node/kind right) :nil))
       (let [n (identity/integer-i64 left)]
-        (and (option-some?-of [:option :i64] n) (integer=? right (option-value-of [:option :i64] n 0))))))
+        (and (option-some?-of [:option :i64] n) (integer=? right (option-match [:option :i64] n 0 found-value found-value)))))))
 (defn- sequence=? [left [:ref :gmir.node/value] right [:ref :gmir.node/value]] :bool
-  (and (or (= (node/kind left) :vector) (= (node/kind left) :list))
+  (arena-scope (and (or (= (node/kind left) :vector) (= (node/kind left) :list))
        (or (= (node/kind right) :vector) (= (node/kind right) :list))
        (= (node/child-count left) (node/child-count right))
        (loop [index 0]
          (if (>= index (node/child-count left)) true
-           (if (same-location? (at left index) (at right index)) (recur (+ index 1)) false)))))
+           (if (same-location? (at left index) (at right index)) (recur (+ index 1)) false))))))
 (defn- unique-names? [values [:ref :gmir.node/value]] :bool
-  (loop [index 0 previous 0]
+  (arena-scope (loop [index 0 previous 0]
     (cond (>= index (node/child-count values)) true
           (>= previous index) (recur (+ index 1) 0)
           (node/same-name? (at values index) (at values previous)) false
-          :else (recur index (+ previous 1)))))
+          :else (recur index (+ previous 1))))))
 (defn- select [instructions [:ref :gmir.node/value] op :keyword] [:ref :gmir.node/value]
   (loop [index 0 out (node/empty-vector)]
     (if (>= index (node/child-count instructions)) out
       (let [value (at instructions index)]
         (recur (+ index 1) (if (instruction? value op) (node/append out value) out))))))
 (defn- call? [value [:ref :gmir.node/value]] :bool
-  ;; x86-privileged is intentionally absent from this owning frame-policy set.
+  (arena-scope ;; x86-privileged is intentionally absent from this owning frame-policy set.
   (or (instruction? value :mir/call) (instruction? value :mir/tail-call)
-      (instruction? value :mir/runtime-call) (instruction? value :mir/capability-call)))
+      (instruction? value :mir/runtime-call) (instruction? value :mir/capability-call))))
 (defn- calls-or-recurs? [instructions [:ref :gmir.node/value]] :bool
-  (loop [index 0]
+  (arena-scope (loop [index 0]
     (if (>= index (node/child-count instructions)) false
       (let [value (at instructions index)]
-        (if (or (call? value) (instruction? value :mir/recur)) true (recur (+ index 1)))))))
+        (if (or (call? value) (instruction? value :mir/recur)) true (recur (+ index 1))))))))
 (defn- call-registers [target :keyword] [:list :keyword]
-  (option-value-of [:option [:list :keyword]] (catalog/registers-for (catalog/call-argument-registers) target :all) (typed-list-new [:list :keyword])))
+  (option-match [:option [:list :keyword]] (catalog/registers-for (catalog/call-argument-registers) target :all) (typed-list-new [:list :keyword]) found-value found-value))
 (defn- function-index [functions [:ref :gmir.node/value] name [:ref :gmir.node/value]] :i64
-  (loop [index 0]
+  (arena-scope (loop [index 0]
     (if (>= index (node/child-count functions)) -1
-      (if (node/same-name? name (node/key (at functions index) :mir/name)) index (recur (+ index 1))))))
+      (if (node/same-name? name (node/key (at functions index) :mir/name)) index (recur (+ index 1)))))))
 (defn- function-names [functions [:ref :gmir.node/value]] [:ref :gmir.node/value]
   (loop [index 0 out (node/empty-vector)]
     (if (>= index (node/child-count functions)) out
       (recur (+ index 1) (node/append out (node/key (at functions index) :mir/name))))))
 (defn- valid-names? [names [:ref :gmir.node/value]] :bool
-  (and (unique-names? names)
+  (arena-scope (and (unique-names? names)
        (loop [index 0]
          (if (>= index (node/child-count names)) true
-           (if (identity/function-id? (at names index)) (recur (+ index 1)) false)))))
+           (if (identity/function-id? (at names index)) (recur (+ index 1)) false))))))
 (defn- function-data [function [:ref :gmir.node/value] key :keyword data [:ref :gmir.node/value]] [:ref :gmir.node/value]
   (-> (node/empty-map) (node/put-key :function (node/key function :mir/name)) (node/put-key key data)))
 
@@ -103,7 +103,7 @@
                (if (>= index (node/child-count instructions)) true
                  (let [value (at instructions index)]
                    (if (and (instruction? value :mir/incoming-load)
-                            (>= (option-value-of [:option :i64] (identity/integer-i64 (node/key value :mir/index)) arity) arity))
+                            (>= (option-match [:option :i64] (identity/integer-i64 (node/key value :mir/index)) arity found-value found-value) arity))
                      false (recur (+ index 1)))))))
       (clean) (failure :entry-argument-profile-violation (function-data function :arguments arguments)))))
 
@@ -133,38 +133,38 @@
         load (instruction? instruction :mir/spill-load) store (instruction? instruction :mir/spill-store)
         parameter (home-parameter (if load slots registers) (node/key instruction (if load :mir/slot :mir/src)))]
     (if (and (or load store (instruction? instruction :mir/move)) (option-some?-of [:option :i64] parameter))
-      (let [n (option-value-of [:option :i64] parameter -1)]
+      (let [n (option-match [:option :i64] parameter -1 found-value found-value)]
         (option-some-of [:option [:ref :mir.validation/transport]]
           (record-new [:ref :mir.validation/transport]
             (if store registers (put-home registers (node/key instruction :mir/dst) n))
             (if store (put-home slots (node/key instruction :mir/slot) n) slots))))
       (option-none-of [:option [:ref :mir.validation/transport]]))))
 (defn- canonical-prefix? [abi [:list :keyword] arity :i64 instructions [:ref :gmir.node/value]] :bool
-  (and (>= (node/child-count instructions) arity)
+  (arena-scope (and (>= (node/child-count instructions) arity)
        (loop [index 0]
          (if (>= index arity) true
            (let [value (at instructions index)]
              (if (and (instruction? value :mir/argument) (integer=? (node/key value :mir/index) index)
                       (named? (node/key value :mir/dst) (typed-list-nth [:list :keyword] abi index)))
-               (recur (+ index 1)) false))))))
+               (recur (+ index 1)) false)))))))
 (defn- first-reentry [instructions [:ref :gmir.node/value]] :i64
-  (loop [index 0]
+  (arena-scope (loop [index 0]
     (if (>= index (node/child-count instructions)) -1
-      (if (instruction? (at instructions index) :mir/reentry) index (recur (+ index 1))))))
+      (if (instruction? (at instructions index) :mir/reentry) index (recur (+ index 1)))))))
 (defn- prefix-transport? [target :keyword arity :i64 instructions [:ref :gmir.node/value]
                          index :i64 parameters [:ref :gmir.node/value]] :bool
-  (let [abi (call-registers target)]
+  (arena-scope (let [abi (call-registers target)]
     (and (canonical-prefix? abi arity instructions) (>= index arity)
          (loop [cursor arity state (record-new [:ref :mir.validation/transport] (initial-homes abi arity) (typed-list-new [:list [:ref :mir.validation/home]]))]
            (if (>= cursor index)
              (loop [parameter 0]
                (if (>= parameter (node/child-count parameters)) true
                  (let [home (home-parameter (record-get [:ref :mir.validation/transport] state :registers) (at parameters parameter))]
-                   (if (and (option-some?-of [:option :i64] home) (= (option-value-of [:option :i64] home -1) parameter))
+                   (if (and (option-some?-of [:option :i64] home) (= (option-match [:option :i64] home -1 found-value found-value) parameter))
                      (recur (+ parameter 1)) false))))
              (let [next (transport state (at instructions cursor))]
                (if (option-some?-of [:option [:ref :mir.validation/transport]] next)
-                 (recur (+ cursor 1) (option-value-of [:option [:ref :mir.validation/transport]] next state)) false)))))))
+                 (recur (+ cursor 1) (option-match [:option [:ref :mir.validation/transport]] next state found-value found-value)) false))))))))
 (defn- reentry-error [target :keyword arity :i64 function [:ref :gmir.node/value] instructions [:ref :gmir.node/value]]
   [:option [:ref :mir/refusal]]
   (let [abi-count (vector-count (call-registers target)) n (if (< arity abi-count) arity abi-count)
@@ -204,9 +204,9 @@
           (kw :mir/data-address) (kw :mir/rodata-address) (kw :mir/function-address)))
 (defn- backed-value-operation? [explicit [:list :keyword] windows [:list :keyword]
                                slices [:list :keyword] atomics [:list :keyword] value [:ref :gmir.node/value]] :bool
-  (let [op (node/key value :mir/op)]
+  (arena-scope (let [op (node/key value :mir/op)]
     (or (member? explicit op) (member? windows op)
-        (member? slices op) (member? atomics op))))
+        (member? slices op) (member? atomics op)))))
 (defn- backing-error [function [:ref :gmir.node/value] instructions [:ref :gmir.node/value]] [:option [:ref :mir/refusal]]
   (let [explicit (explicit-backed-value-operations) windows (catalog/kernel-window-operations)
         slices (catalog/slice-operations) atomics (catalog/kernel-atomic-ops)]
@@ -236,15 +236,15 @@
 ;; callee function. Keep numeric comparisons, including non-integral f64s, so
 ;; an invalid later signature cannot silently change the first refusal order.
 (defn- small-positive-f64-bits [value :i64] :i64
-  (if (= value 0) 0
+  (arena-scope (if (= value 0) 0
     (loop [exponent 0 base 1]
       (if (> (* base 2) value)
-        (+ (bit-shift-left (+ exponent 1023) 52) (bit-shift-left (- value base) (- 52 exponent)))
-        (recur (+ exponent 1) (* base 2))))))
+        (+ (i64-shift-left (+ exponent 1023) 52) (i64-shift-left (- value base) (- 52 exponent)))
+        (recur (+ exponent 1) (* base 2)))))))
 (defn- greater-than-count [value [:ref :gmir.node/value] count :i64] [:option :bool]
   (let [n (identity/integer-i64 value)]
     (cond
-      (option-some?-of [:option :i64] n) (option-some-of [:option :bool] (> (option-value-of [:option :i64] n 0) count))
+      (option-some?-of [:option :i64] n) (option-some-of [:option :bool] (> (option-match [:option :i64] n 0 found-value found-value) count))
       (identity/integer-form? value) (option-some-of [:option :bool] (identity/nonnegative-integer? value))
       (= (node/kind value) :f64)
       (let [bits (node/number value)]
@@ -254,7 +254,7 @@
   (let [n (identity/integer-i64 value)]
     (cond
       (option-some?-of [:option :i64] n)
-      (let [limit (option-value-of [:option :i64] n 0)]
+      (let [limit (option-match [:option :i64] n 0 found-value found-value)]
         (if (<= limit register-count) (option-some-of [:option :i64] register-count)
           (if (<= limit (gmir-catalog/max-arity)) (option-some-of [:option :i64] limit) (option-none-of [:option :i64]))))
       (= (node/kind value) :f64)
@@ -273,7 +273,7 @@
             (if (< callee 0) (failure :unresolved-callee call)
               (let [expected (node/key (at functions callee) :mir/arity)
                     count (vector-count (call-registers target)) larger (greater-than-count expected count)
-                    above (option-value-of [:option :bool] larger false)
+                    above (option-match [:option :bool] larger false found-value found-value)
                     matches (if virtual (integer=? expected (node/child-count (node/key call :mir/arguments)))
                               (and (option-some?-of [:option :bool] larger)
                                    (if above (= count (node/child-count (node/key call :mir/arguments)))
@@ -282,16 +282,16 @@
                   (failure :call-arity-mismatch (node/put-key (function-data function :call call) :expected expected))))))
           (recur (+ index 1)))))))
 (defn- stack-stores? [pending [:ref :gmir.node/value] register-count :i64 limit :i64 expected-op :keyword] :bool
-  (and (= (node/child-count pending) (- limit register-count))
+  (arena-scope (and (= (node/child-count pending) (- limit register-count))
        (loop [index 0]
          (if (>= index (node/child-count pending)) true
            (let [store (at pending index) n (identity/integer-i64 (node/key store :mir/index))
-                 value (option-value-of [:option :i64] n -1)]
+                 value (option-match [:option :i64] n -1 found-value found-value)]
              (if (and (instruction? store expected-op) (option-some?-of [:option :i64] n) (>= value register-count) (< value limit)
                       (loop [previous 0]
                         (if (>= previous index) true
                           (if (integer=? (node/key (at pending previous) :mir/index) value) false (recur (+ previous 1))))))
-               (recur (+ index 1)) false))))))
+               (recur (+ index 1)) false)))))))
 (defn- stack-error [target :keyword arity :i64 function [:ref :gmir.node/value] functions [:ref :gmir.node/value]
                    instructions [:ref :gmir.node/value]] [:option [:ref :mir/refusal]]
   (let [register-count (vector-count (call-registers target))]
@@ -310,7 +310,7 @@
                   limit (stack-limit signature register-count)
                   expected-op (if (or (instruction? value :mir/tail-call) (instruction? value :mir/recur)) :mir/incoming-argument-store :mir/outgoing-argument)]
               (if (and (option-some?-of [:option :i64] limit)
-                       (stack-stores? pending register-count (option-value-of [:option :i64] limit register-count) expected-op))
+                       (stack-stores? pending register-count (option-match [:option :i64] limit register-count found-value found-value) expected-op))
                 (recur (+ index 1) (node/empty-vector))
                 (failure :stack-argument-profile-violation (node/put-key (function-data function :call value) :stores pending))))
             :else (recur (+ index 1) pending)))))))
@@ -319,7 +319,7 @@
   [:option [:ref :mir/refusal]]
   (let [keys (-> (typed-list-new [:list :keyword]) (kw :mir/name) (kw :mir/arity) (kw :mir/instructions))
         expected (if virtual keys (-> keys (kw :mir/frame-slots) (kw :mir/frame-policy)))
-        n (identity/integer-i64 (node/key function :mir/arity)) arity (option-value-of [:option :i64] n -1)
+        n (identity/integer-i64 (node/key function :mir/arity)) arity (option-match [:option :i64] n -1 found-value found-value)
         policy (node/key function :mir/frame-policy) instructions (node/key function :mir/instructions)]
     (if (not (and (fields? function expected) (identity/function-id? (node/key function :mir/name))
                   (option-some?-of [:option :i64] n) (>= arity 0) (<= arity (gmir-catalog/max-arity))
@@ -368,5 +368,5 @@
     (let [semantic (module-error program) error (if (failed? semantic) semantic (flat/representation-error program))]
       (if (failed? error)
         (result-err-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]]
-          (option-value-of [:option [:ref :mir/refusal]] error (outcome/refusal :non-canonical-module program)))
+          (option-match [:option [:ref :mir/refusal]] error (outcome/refusal :non-canonical-module program) found-value found-value))
         (result-ok-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] program)))))

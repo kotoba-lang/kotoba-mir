@@ -7,15 +7,15 @@
             [kotoba.mir.table :as table]))
 
 (defn- at [value [:ref :gmir.node/value] index :i64] [:ref :gmir.node/value]
-  (option-value-of [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value)))
+  (option-match [:option [:ref :gmir.node/value]] (node/child value index) (node/nil-value) item item))
 (defn- named? [value [:ref :gmir.node/value] key :keyword] :bool
-  (node/same-name? value (node/keyword-literal key)))
-(defn- instruction? [value [:ref :gmir.node/value] op :keyword] :bool (named? (node/key value :mir/op) op))
+  (arena-scope (node/keyword-is? value key)))
+(defn- instruction? [value [:ref :gmir.node/value] op :keyword] :bool (arena-scope (named? (node/key value :mir/op) op)))
 (defn- integer=? [value [:ref :gmir.node/value] expected :i64] :bool
-  (let [number (identity/integer-i64 value)]
-    (and (option-some?-of [:option :i64] number) (= (option-value-of [:option :i64] number 0) expected))))
+  (arena-scope (let [number (identity/integer-i64 value)]
+    (and (option-some?-of [:option :i64] number) (= (option-match [:option :i64] number 0 found-value found-value) expected)))))
 (defn- pure-op? [op [:ref :gmir.node/value]] :bool
-  ;; Exactly the owning closed allow-list. General quotient, memory, floating
+  (arena-scope ;; Exactly the owning closed allow-list. General quotient, memory, floating
   ;; arithmetic, branches, calls and effect operations cannot enter via default.
   (or (named? op :mir/argument) (named? op :mir/constant)
       (named? op :mir/add) (named? op :mir/subtract) (named? op :mir/multiply)
@@ -23,36 +23,36 @@
       (named? op :mir/bit-and) (named? op :mir/bit-or) (named? op :mir/bit-xor)
       (named? op :mir/shift-left) (named? op :mir/shift-right-signed) (named? op :mir/shift-right-unsigned)
       (named? op :mir/equal) (named? op :mir/less-than) (named? op :mir/greater-than)
-      (named? op :mir/less-or-equal) (named? op :mir/greater-or-equal) (named? op :mir/move)))
+      (named? op :mir/less-or-equal) (named? op :mir/greater-or-equal) (named? op :mir/move))))
 (defn- pure-instruction? [instruction [:ref :gmir.node/value]] :bool
-  (let [divisor (node/key instruction :mir/divisor)]
+  (arena-scope (let [divisor (node/key instruction :mir/divisor)]
     (or (pure-op? (node/key instruction :mir/op))
         (and (instruction? instruction :mir/quotient-constant) (identity/i64-value? divisor)
-             (not (integer=? divisor 0)) (not (integer=? divisor -1))))))
+             (not (integer=? divisor 0)) (not (integer=? divisor -1)))))))
 (defn- op-count [instructions [:ref :gmir.node/value] op :keyword] :i64
-  (loop [index 0 count 0]
+  (arena-scope (loop [index 0 count 0]
     (if (>= index (node/child-count instructions)) count
-      (recur (+ index 1) (+ count (if (instruction? (at instructions index) op) 1 0))))))
+      (recur (+ index 1) (+ count (if (instruction? (at instructions index) op) 1 0)))))))
 (defn- first-op [instructions [:ref :gmir.node/value] op :keyword] :i64
-  (loop [index 0]
+  (arena-scope (loop [index 0]
     (if (>= index (node/child-count instructions)) -1
-      (if (instruction? (at instructions index) op) index (recur (+ index 1))))))
+      (if (instruction? (at instructions index) op) index (recur (+ index 1)))))))
 (defn- argument-at [instructions [:ref :gmir.node/value] parameter :i64] [:ref :gmir.node/value]
   (loop [index 0]
     (if (>= index (node/child-count instructions)) (node/nil-value)
       (let [value (at instructions index)]
         (if (and (instruction? value :mir/argument) (integer=? (node/key value :mir/index) parameter)) value (recur (+ index 1)))))))
 (defn- complete-arguments? [instructions [:ref :gmir.node/value] count :i64] :bool
-  ;; Sorting the reference arguments then comparing with range(count) is
+  (arena-scope ;; Sorting the reference arguments then comparing with range(count) is
   ;; equivalent to exact cardinality plus the presence of each unique index.
   (and (= count (op-count instructions :mir/argument))
        (loop [parameter 0]
          (if (>= parameter count) true
-           (if (= (node/kind (argument-at instructions parameter)) :nil) false (recur (+ parameter 1)))))))
+           (if (= (node/kind (argument-at instructions parameter)) :nil) false (recur (+ parameter 1))))))))
 (defn- counter-parameter [instructions [:ref :gmir.node/value] arity :i64 counter [:ref :gmir.node/value]] :i64
-  (loop [parameter 0]
+  (arena-scope (loop [parameter 0]
     (if (>= parameter arity) -1
-      (if (node/same-name? counter (node/key (argument-at instructions parameter) :mir/dst)) parameter (recur (+ parameter 1))))))
+      (if (node/same-name? counter (node/key (argument-at instructions parameter) :mir/dst)) parameter (recur (+ parameter 1)))))))
 (defn- last-definition [instructions [:ref :gmir.node/value] destination [:ref :gmir.node/value]] [:ref :gmir.node/value]
   ;; Selected MIR destination identities are keywords. Reverse search retains
   ;; the owning `into {}` last-definition behavior, including definitions after
@@ -64,23 +64,23 @@
 (defn- symbol-key [value [:ref :gmir.node/value]] [:ref :mir.table/key]
   (table/symbol-key (node/namespace-of value) (node/name-of value)))
 (defn- pure-leaf? [function [:ref :gmir.node/value]] :bool
-  (let [instructions (node/key function :mir/instructions)]
+  (arena-scope (let [instructions (node/key function :mir/instructions)]
     (and (= (node/kind (node/key function :mir/name)) :symbol) (= (op-count instructions :mir/return) 1)
          (loop [index 0]
            (if (>= index (node/child-count instructions)) true
              (let [value (at instructions index)]
-               (if (or (instruction? value :mir/return) (pure-instruction? value)) (recur (+ index 1)) false)))))))
+               (if (or (instruction? value :mir/return) (pure-instruction? value)) (recur (+ index 1)) false))))))))
 (defn- admitted-call? [instruction [:ref :gmir.node/value] leaves [:ref :mir.table/tree]] :bool
-  (let [name (node/key instruction :mir/callee)]
+  (arena-scope (let [name (node/key instruction :mir/callee)]
     (and (instruction? instruction :mir/call) (= (node/kind name) :symbol)
-         (option-some?-of [:option [:ref :mir.table/value]] (table/get leaves (symbol-key name))))))
+         (option-some?-of [:option [:ref :mir.table/value]] (table/get leaves (symbol-key name)))))))
 (defn- closed-body? [instructions [:ref :gmir.node/value] leaves [:ref :mir.table/tree]] :bool
-  (loop [index 0]
+  (arena-scope (loop [index 0]
     (if (>= index (node/child-count instructions)) true
       (let [value (at instructions index)]
         (if (or (instruction? value :mir/branch-nonzero) (instruction? value :mir/return)
                 (instruction? value :mir/label) (instruction? value :mir/tail-call)
-                (pure-instruction? value) (admitted-call? value leaves)) (recur (+ index 1)) false)))))
+                (pure-instruction? value) (admitted-call? value leaves)) (recur (+ index 1)) false))))))
 (defn- plan [parameter :i64] [:ref :gmir.node/value]
   (-> (node/empty-map) (node/put-key :counter-parameter (node/i64-value parameter))
       (node/put-key :runtime-domain (node/keyword-literal :nonnegative-i64))
@@ -130,5 +130,5 @@
                         (let [value (at functions index) proof (prove value leaves)]
                           (recur (+ index 1) (if (option-some?-of [:option [:ref :gmir.node/value]] proof)
                             (node/append (node/append out (node/key value :mir/name))
-                              (option-value-of [:option [:ref :gmir.node/value]] proof (node/nil-value))) out)))))]
+                              (option-match [:option [:ref :gmir.node/value]] proof (node/nil-value) found-value found-value)) out)))))]
           (result-ok-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] plans))))))

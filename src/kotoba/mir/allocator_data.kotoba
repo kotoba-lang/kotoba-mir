@@ -7,22 +7,22 @@
   (:require [kotoba.gmir.node :as node] [kotoba.gmir.identity :as identity]
             [kotoba.mir.table :as table] [kotoba.mir.operands :as operands]))
 (defn at [values [:ref :gmir.node/value] index :i64] [:ref :gmir.node/value]
-  (option-value-of [:option [:ref :gmir.node/value]] (node/child values index) (node/nil-value)))
-(defn named? [value [:ref :gmir.node/value] key :keyword] :bool (node/same-name? value (node/keyword-literal key)))
-(defn op? [instruction [:ref :gmir.node/value] op :keyword] :bool (named? (node/key instruction :mir/op) op))
+  (option-match [:option [:ref :gmir.node/value]] (node/child values index) (node/nil-value) item item))
+(defn named? [value [:ref :gmir.node/value] key :keyword] :bool (arena-scope (node/keyword-is? value key)))
+(defn op? [instruction [:ref :gmir.node/value] op :keyword] :bool (arena-scope (named? (node/key instruction :mir/op) op)))
 (defn key-at [values [:ref :mir.table/tree] index :i64] [:ref :mir.table/key]
-  (option-value-of [:option [:ref :mir.table/key]] (table/key-at values index) (table/nil-key)))
+  (option-match [:option [:ref :mir.table/key]] (table/key-at values index) (table/nil-key) found-value found-value))
 (defn key-node [key [:ref :mir.table/key]] [:ref :gmir.node/value]
   (let [ns (record-get [:ref :mir.table/key] key :namespace) name (record-get [:ref :mir.table/key] key :name)]
     (case (record-get [:ref :mir.table/key] key :kind)
       :index (node/i64-value (record-get [:ref :mir.table/key] key :index))
       :keyword (node/keyword-parts ns name) :symbol (node/symbol-parts ns name) (node/nil-value))))
 (defn present? [values [:ref :mir.table/tree] key [:ref :mir.table/key]] :bool
-  (option-some?-of [:option [:ref :mir.table/value]] (table/get values key)))
+  (arena-scope (option-some?-of [:option [:ref :mir.table/value]] (table/get values key))))
 (defn lookup [values [:ref :mir.table/tree] key [:ref :mir.table/key]] [:ref :gmir.node/value]
-  (table/data (option-value-of [:option [:ref :mir.table/value]] (table/get values key) (table/scalar (node/nil-value)))))
+  (table/data (option-match [:option [:ref :mir.table/value]] (table/get values key) (table/scalar (node/nil-value)) found-value found-value)))
 (defn get-number [values [:ref :mir.table/tree] key [:ref :mir.table/key] fallback :i64] :i64
-  (if (present? values key) (node/number (lookup values key)) fallback))
+  (arena-scope (if (present? values key) (node/number (lookup values key)) fallback)))
 (defn put-data [values [:ref :mir.table/tree] key [:ref :mir.table/key] value [:ref :gmir.node/value]] [:ref :mir.table/tree]
   (table/put values key (table/scalar value)))
 (defn put-number [values [:ref :mir.table/tree] key [:ref :mir.table/key] value :i64] [:ref :mir.table/tree]
@@ -30,7 +30,7 @@
 (defn include [values [:ref :mir.table/tree] key [:ref :mir.table/key]] [:ref :mir.table/tree]
   (put-data values key (node/nil-value)))
 (defn exclude [values [:ref :mir.table/tree] key [:ref :mir.table/key]] [:ref :mir.table/tree] (table/remove values key))
-(defn member? [values [:ref :mir.table/tree] key [:ref :mir.table/key]] :bool (present? values key))
+(defn member? [values [:ref :mir.table/tree] key [:ref :mir.table/key]] :bool (arena-scope (present? values key)))
 (defn union [left [:ref :mir.table/tree] right [:ref :mir.table/tree]] [:ref :mir.table/tree]
   (loop [index 0 out left]
     (if (>= index (table/count right)) out (recur (+ index 1) (include out (key-at right index))))))
@@ -42,12 +42,12 @@
   (loop [index 0 out left]
     (if (>= index (table/count right)) out (recur (+ index 1) (exclude out (key-at right index))))))
 (defn same-set? [left [:ref :mir.table/tree] right [:ref :mir.table/tree]] :bool
-  (and (= (table/count left) (table/count right))
+  (arena-scope (and (= (table/count left) (table/count right))
        (loop [index 0]
          (if (>= index (table/count left)) true
-           (if (member? right (key-at left index)) (recur (+ index 1)) false)))))
+           (if (member? right (key-at left index)) (recur (+ index 1)) false))))))
 (defn members [values [:ref :mir.table/tree] key [:ref :mir.table/key]] [:ref :mir.table/tree]
-  (table/members (option-value-of [:option [:ref :mir.table/value]] (table/get values key) (table/scalar (node/nil-value)))))
+  (table/members (option-match [:option [:ref :mir.table/value]] (table/get values key) (table/scalar (node/nil-value)) found-value found-value)))
 (defn put-members [values [:ref :mir.table/tree] key [:ref :mir.table/key] members [:ref :mir.table/tree]] [:ref :mir.table/tree]
   (table/put values key (table/members-value members)))
 (defn slice [values [:ref :gmir.node/value] start :i64 end :i64] [:ref :gmir.node/value]

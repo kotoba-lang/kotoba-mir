@@ -10,11 +10,11 @@
   (:schemas
    {:mir.allocator/allocation [:record :mir.allocator/allocation [[:program [:ref :gmir.node/value]] [:policy :keyword]]]}))
 (defn- has-calls? [code [:ref :gmir.node/value]] :bool
-  (loop [index 0]
+  (arena-scope (loop [index 0]
     (if (>= index (node/child-count code)) false
       (let [instruction (data/at code index)]
         (if (or (data/op? instruction :mir/call) (data/op? instruction :mir/tail-call)
-                (data/op? instruction :mir/runtime-call) (data/op? instruction :mir/capability-call)) true (recur (+ index 1)))))))
+                (data/op? instruction :mir/runtime-call) (data/op? instruction :mir/capability-call)) true (recur (+ index 1))))))))
 (defn- schedule-result [result [:result [:ref :gmir.node/value] [:ref :mir/refusal]]] [:result [:ref :gmir.node/value] [:ref :mir/refusal]]
   (if (not (result-ok?-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] result)) result
     (schedule/schedule-program (result-value-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] result (node/nil-value)))))
@@ -38,7 +38,7 @@
             (record-new [:ref :mir.allocator/allocation] (result-value-of [:result [:ref :gmir.node/value] [:ref :mir/refusal]] result (node/nil-value))
               (if calls (if fallback :all-vregs :call-live) :allocator))))))))
 (defn- stack-argument-rewrite [code [:ref :gmir.node/value] target :keyword] [:ref :gmir.node/value]
-  (let [bank (option-value-of [:option [:list :keyword]] (catalog/registers-for (catalog/call-argument-registers) target :all) (typed-list-new [:list :keyword]))
+  (let [bank (option-match [:option [:list :keyword]] (catalog/registers-for (catalog/call-argument-registers) target :all) (typed-list-new [:list :keyword]) found-value found-value)
         limit (vector-count bank)
         needed (loop [index 0]
                  (if (>= index (node/child-count code)) false
